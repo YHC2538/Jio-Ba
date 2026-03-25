@@ -1,0 +1,9 @@
+py-cord
+python-dotenv
+motor
+google-generativeai
+rich
+langgraph
+langchain
+langchain-google-genai
+langchain-openai
