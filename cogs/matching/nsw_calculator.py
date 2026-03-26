@@ -4,7 +4,7 @@ from itertools import product
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 DEALBREAKER_PENALTY = 0.01
-DEFAULT_WEIGHTS = {"when": 0.4, "where": 0.35, "budget": 0.25}
+DEFAULT_WEIGHTS = {"when": 0.35, "where": 0.3, "what": 0.2, "how": 0.15}
 
 
 @dataclass
@@ -67,9 +67,17 @@ def utility(user: UserProfile, candidate: CandidatePlan) -> float:
     merged_weights.update(user.weights or {})
 
     score = 0.0
-    score += merged_weights["when"] * _field_score(user.preferences.get("when"), candidate.when)
-    score += merged_weights["where"] * _field_score(user.preferences.get("where"), candidate.where)
-    score += merged_weights["budget"] * _field_score(user.preferences.get("budget"), candidate.budget)
+    pref = user.preferences or {}
+
+    when_pref = pref.get("core_when") or pref.get("when")
+    where_pref = pref.get("core_where") or pref.get("where")
+    what_pref = pref.get("core_what") or pref.get("what")
+    how_pref = pref.get("core_how") or pref.get("how") or pref.get("budget")
+
+    score += merged_weights.get("when", 0.0) * _field_score(when_pref, candidate.when)
+    score += merged_weights.get("where", 0.0) * _field_score(where_pref, candidate.where)
+    score += merged_weights.get("what", 0.0) * _field_score(what_pref, candidate.what)
+    score += merged_weights.get("how", 0.0) * _field_score(how_pref, candidate.budget)
 
     return max(score, DEALBREAKER_PENALTY)
 

@@ -1,6 +1,6 @@
 from langchain_core.tools import tool
-from typing import List, Annotated
-from langgraph.prebuilt import InjectedState
+from typing import List
+import discord
 
 def get_dinner_tools(bot):
     """
@@ -56,7 +56,7 @@ def get_dinner_tools(bot):
             return f"Error announcing to {channel_id}: {str(e)}"
 
     @tool
-    async def update_participant_db(event_id: str, user_id: int, status: str = None, add_constraints: List[str] = None, is_whatever: bool = None):
+    async def update_participant_db(event_id: str, user_id: int, status: str = None, answers: dict = None):
         """
         Update a participant's DB record.
         ALWAYS call this when you extract new information from a user.
@@ -72,15 +72,12 @@ def get_dinner_tools(bot):
             oid = ObjectId(event_id)
             if status:
                 await db.update_participant_status(oid, user_id, status)
-            if add_constraints:
-                p = await db.get_participant(oid, user_id)
-                current = p.get("constraints", []) if p else []
-                new_set = set(current)
-                new_set.update(add_constraints)
-                await db.update_participant_constraints(oid, user_id, list(new_set))
-                
-            if is_whatever is not None:
-                await db.set_participant_whatever(oid, user_id, is_whatever)
+            if answers is not None:
+                participant = await db.get_participant(oid, user_id)
+                interview = (participant or {}).get("interview", {}) or {}
+                merged = dict(interview.get("answers", {}) or {})
+                merged.update(answers)
+                await db.update_participant_interview(oid, user_id, answers=merged)
             
             # AUTO-UPDATE DASHBOARD to prevent race conditions
             jio_cog = bot.get_cog("Jio")
@@ -213,7 +210,7 @@ def get_dinner_tools(bot):
             
             channel = bot.get_channel(event["channel_id"])
             if channel:
-                await channel.send(f"🎉 **聚餐結論**: {conclusion}")
+                await channel.send(f"🎉 **活動結論**: {conclusion}")
             
             return "Event concluded and announced."
         except Exception as e:
@@ -224,7 +221,7 @@ def get_dinner_tools(bot):
         """
         Send DMs to multiple participants in a batch.
         Args:
-            messages: List of dicts, each having {"user_id": int, "content": str}
+            messages: List of dicts, each having {"user_id": int, "content": str, "embed": dict(optional)}
             event_id: The event ID string.
             force: Set to True to BYPASS anti-nagging checks (CRITICAL announcements only).
         """
@@ -244,7 +241,8 @@ def get_dinner_tools(bot):
             event = await db.get_event(oid)
             if event:
                 for p in event.get("participants", []):
-                    participant_status[p["user_id"]] = p.get("last_question_status", "NONE")
+                    interview = p.get("interview", {}) or {}
+                    participant_status[p["user_id"]] = interview.get("last_question_status", "NONE")
 
         # [NEW] Group by content to minimize history entries
         # Key: content, Value: list of user_ids
@@ -254,6 +252,7 @@ def get_dinner_tools(bot):
         for msg in messages:
             uid = msg.get("user_id")
             content = msg.get("content")
+            embed_payload = msg.get("embed")
             if not uid or not content: 
                 results.append(f"Skipped invalid msg: {msg}")
                 continue
@@ -274,7 +273,11 @@ def get_dinner_tools(bot):
             try:
                 target_user = await bot.fetch_user(uid)
                 if target_user:
-                    await target_user.send(content)
+                    if embed_payload and isinstance(embed_payload, dict):
+                        embed = discord.Embed.from_dict(embed_payload)
+                        await target_user.send(content=content, embed=embed)
+                    else:
+                        await target_user.send(content)
                     if db:
                         # Update Reply Status
                         await db.set_participant_reply_status(oid, uid, "WAITING_FOR_REPLY")
@@ -292,54 +295,6 @@ def get_dinner_tools(bot):
 
         return "Batch Send Results: " + ", ".join(results)
 
-    @tool
-    async def set_phase(event_id: str, phase: str):
-        """
-        advance the event phase.
-        Valid phases: 'LOGISTICS', 'CUISINE', 'CONCLUSION'.
-        Call this when the previous phase is 'settled' (consensus reached).
-        """
-        valid_phases = ["LOGISTICS", "CUISINE", "CONCLUSION"]
-        if phase not in valid_phases:
-            return f"Invalid phase. Must be one of {valid_phases}"
-            
-        db = bot.get_cog("Database")
-        if not db: return "DB Error"
-        
-        from bson import ObjectId
-        if not ObjectId.is_valid(event_id): return "Invalid Event ID"
-        
-        await db.set_event_phase(ObjectId(event_id), phase)
-        return f"Event Phase transitioned to {phase}."
-
-    @tool
-    async def manage_tasks(action: str, content: str, event_id: Annotated[str, InjectedState("event_id")]):
-        """
-        Manage dynamic To-Do list.
-        Args:
-            action: 'add', 'complete', 'delete'
-            content: Task description (if adding) or Task ID (if completing/deleting).
-            event_id: (Injected) The event ID.
-        """
-        db = bot.get_cog("Database")
-        if not db: return "DB Error"
-        
-        from bson import ObjectId
-        if not ObjectId.is_valid(event_id): return "Invalid Event ID"
-        
-        result = await db.manage_task(ObjectId(event_id), action, content)
-        return result
-
-    @tool
-    async def random_pick(options: List[str]):
-        """
-        Randomly select one item from the provided list of options.
-        Use this when Decision Mode is 'RANDOM' or when users ask to pick randomly.
-        """
-        import random
-        if not options: return "Error: No options provided."
-        choice = random.choice(options)
-        return f"Randomly selected: {choice}"
 
     @tool
     async def kick_participant(event_id: str, user_id: int, reason: str = "Reason not specified"):
@@ -367,10 +322,10 @@ def get_dinner_tools(bot):
         try:
             target_user = await bot.fetch_user(user_id)
             if target_user:
-                await target_user.send(f"🚫 您已被移除出聚餐活動。\n原因: {reason}")
+                await target_user.send(f"🚫 您已被移出活動。\n原因: {reason}")
         except:
             pass
             
         return f"User {user_id} has been KICKED. Reason: {reason}"
 
-    return [batch_send_messages, announce_to_channel, update_participant_db, search_restaurant, conclude_event, set_phase, manage_tasks, random_pick, kick_participant]
+    return [batch_send_messages, announce_to_channel, update_participant_db, search_restaurant, conclude_event, kick_participant]

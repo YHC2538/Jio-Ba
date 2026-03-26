@@ -157,6 +157,10 @@ class AIBrain(commands.Cog):
                  print(f"[ERROR] Event {event_id} not found during agent invoke.")
                  return None
 
+            if event.get("cancelled") or event.get("workflow_state") in {"CANCELLED", "FAILED_MIN_PARTICIPANTS"}:
+                print(f"[DEBUG LOG] Event {event_id} is cancelled/failed; skipping graph invoke.")
+                return None
+
             # Construct Participants Dict
             participants = {}
             for p in event.get("participants", []):
@@ -173,9 +177,9 @@ class AIBrain(commands.Cog):
                 participants[uid] = {
                     "id": uid,
                     "name": name,
-                    "constraints": p.get("constraints", []),
+                    "answers": (p.get("interview", {}) or {}).get("answers", {}),
                     "status": p.get("status"),
-                    "is_whatever": p.get("is_whatever", False),
+                    "warning_count": p.get("warning_count", 0),
                     "history": p.get("conversation_history", [])
                 }
 
@@ -194,7 +198,16 @@ class AIBrain(commands.Cog):
             
             try:
                 print(f"[DEBUG LOG] Starting graph.ainvoke with inputs: {user_inputs}")
-                final_state = await self.graph.ainvoke(initial_state)
+                trace_config = {
+                    "run_name": "jio_ba_interview_graph",
+                    "tags": ["jio-ba", "discord", f"event:{event_id}"],
+                    "metadata": {
+                        "event_id": event_id,
+                        "participant_count": len(participants),
+                        "input_user_ids": list(user_inputs.keys()),
+                    },
+                }
+                final_state = await self.graph.ainvoke(initial_state, config=trace_config)
                 print("[DEBUG LOG] Graph ainvoke returned.")
                 
                 messages = final_state.get("messages", [])

@@ -1,6 +1,6 @@
-# Wei-Jia-Ba (未呷飽) Discord Bot
+# Jio-Ba Discord Bot
 
-A smart Discord bot that helps groups decide where to eat using AI, random selection, or dictator mode.
+A smart Discord bot that helps groups coordinate dining plans with interview-driven preference matching, NSW recommendations, and host adjudication.
 
 [中文版 (Chinese Version)](./README.zh-TW.md)
 
@@ -8,18 +8,18 @@ A smart Discord bot that helps groups decide where to eat using AI, random selec
 
 - **Event Creation**: Easily organize dining events with `/jio`.
 - **Decision Modes**:
-  - 🤖 **AI**: Uses LLM to analyze preferences and suggest a restaurant.
+   - 🤝 **Consensus**: Auto-adopts top recommendation after report generation.
   - 🎲 **Random**: Randomly picks a winner.
-  - 👑 **Dictator**: The organizer decides.
+   - 👑 **Dictator**: The organizer picks final plan from top recommendations.
 - **Interactive UI**: Discord Buttons and Modals for joining and setting preferences.
-- **Smart Coordination**: AI acts as a facilitator, asking follow-up questions to clarify vague preferences.
+- **DM Interview Flow**: Participants answer in DM, and can select active event when joining multiple events.
+- **Scheduled Event Output**: Final adjudicated plan is announced and converted to Discord Scheduled Event.
 
 ## Prerequisites
 
 - Python 3.10 or higher
 - MongoDB Database
 - Discord Bot Token
-- OpenRouter API Key
 - Google Gemini API Key
 
 ## Installation
@@ -48,8 +48,6 @@ A smart Discord bot that helps groups decide where to eat using AI, random selec
    ```ini
    DISCORD_TOKEN=your_token
    MONGO_URI=your_mongo_uri
-   OPENROUTER_API_KEY=your_openrouter_key
-   OPENROUTER_API_ENDPOINT=https://openrouter.ai/api/v1
    GOOGLE_API_KEY=your_google_key
    GOOGLE_API_ENDPOINT=https://generativelanguage.googleapis.com
    ```
@@ -90,10 +88,14 @@ pm2 startup
 2. Bot posts an embed with a "Join" button.
 3. Participants click "Join" and fill in their preferences (e.g., "Ramen", "Not spicy").
 4. **AI Mode**:
-   - The bot may DM participants to clarify preferences.
-   - Once everyone is ready or time is up, the AI suggests a restaurant.
+   - The bot DMs participants to collect structured preferences and dealbreakers.
+   - If users are in multiple events, they choose active event in DM by index.
 5. **Interview Phase**:
-   - When the event is closed (manually or via time limit), the bot enters the interview phase to finalize the decision.
+   - When deadline is reached or all interviews are complete, NSW generates top candidates.
+6. **Adjudication & Event**:
+   - Dictator mode: host clicks plan button.
+   - Consensus mode: system auto-adopts plan 1.
+   - Bot posts final announcement and creates a Discord Scheduled Event.
 
 ## License
 

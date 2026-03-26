@@ -1,6 +1,7 @@
 import discord
 import os
 import asyncio
+import sys
 from discord.ext import commands
 from dotenv import load_dotenv
 import warnings
@@ -10,8 +11,14 @@ warnings.filterwarnings("ignore", message=".*transport is not default parameter.
 
 load_dotenv()
 
+if not hasattr(discord, "Bot"):
+    print("🛑 CRITICAL ERROR: Unsupported discord package detected (missing discord.Bot).")
+    print("This project requires py-cord in the project virtual environment.")
+    print("Run with: D:/Jio-Ba/.venv/Scripts/python.exe D:/Jio-Ba/Wei-Jia-Ba/main.py")
+    sys.exit(1)
+
 # Startup Environment Check
-required_vars = ["OPENROUTER_API_KEY", "OPENROUTER_API_ENDPOINT", "GOOGLE_API_KEY", "GOOGLE_API_ENDPOINT"]
+required_vars = ["GOOGLE_API_KEY", "GOOGLE_API_ENDPOINT"]
 missing_vars = [var for var in required_vars if not os.getenv(var)]
 if missing_vars:
     print(f"🛑 CRITICAL ERROR: Missing required environment variables: {', '.join(missing_vars)}")

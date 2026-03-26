@@ -1,6 +1,7 @@
 import unittest
 
 from cogs.graph_agent import is_prompt_injection
+from cogs.jio import parse_activity_brief_and_seeds, parse_event_selection
 from cogs.matching.nsw_calculator import (
     CandidatePlan,
     UserProfile,
@@ -17,6 +18,38 @@ class TestGatekeeper(unittest.TestCase):
     def test_normal_message_not_detected(self):
         text = "這週剛考完試，想找市區吃飯"
         self.assertFalse(is_prompt_injection(text))
+
+
+class TestDMSelectionParser(unittest.TestCase):
+    def test_parse_plain_digit(self):
+        self.assertEqual(parse_event_selection("2"), 2)
+
+    def test_parse_with_prefix(self):
+        self.assertEqual(parse_event_selection("選擇 3"), 3)
+
+    def test_parse_invalid(self):
+        self.assertIsNone(parse_event_selection("我要吃火鍋"))
+
+
+class TestActivitySeedParser(unittest.TestCase):
+    def test_parse_strict_seed_format(self):
+        brief, seeds = parse_activity_brief_and_seeds(
+            "what=桌遊;where=台北車站;when=週六下午;why=慶生;how=4小時"
+        )
+        self.assertEqual(brief, "")
+        self.assertEqual(seeds.get("what"), "桌遊")
+        self.assertEqual(seeds.get("where"), "台北車站")
+        self.assertEqual(seeds.get("when"), "週六下午")
+        self.assertEqual(seeds.get("why"), "慶生")
+        self.assertEqual(seeds.get("how"), "4小時")
+
+    def test_parse_mixed_brief_and_seeds(self):
+        brief, seeds = parse_activity_brief_and_seeds(
+            "description=系上交流; where=新竹市; when=下週三晚上"
+        )
+        self.assertIn("系上交流", brief)
+        self.assertEqual(seeds.get("where"), "新竹市")
+        self.assertEqual(seeds.get("when"), "下週三晚上")
 
 
 class TestNSWCalculator(unittest.TestCase):
