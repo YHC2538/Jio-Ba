@@ -1,91 +1,135 @@
-這是一份為開發者量身打造的 `README.md` 文件。內容融合了我們剛剛討論的 LangGraph 架構、Gemini API 串接，以及底層的機制設計數學邏輯。
+# 揪霸 (Jio-Ba)
 
-你可以直接將以下內容複製並存為專案根目錄下的 `README.md`，這會讓接手開發的工程師（或是 AI Coding Agent）一目瞭然地掌握專案的全貌。
+以 AI 為核心的 Discord 揪團機器人，透過私訊逐題訪談、主揪裁決流程與活動公告，降低多人協調成本。
 
----
+[English README](./README.md)
 
-```markdown
-# 揪霸 (Jio Ba) 🤖 - 智慧揪團與需求搓合 Discord Bot
+## 專案能做什麼
 
-> 「告別群組裡的七嘴八舌，讓 AI 幫你找出所有人最滿意的最佳解。」
+Jio-Ba 會幫主揪完成整個活動流程：
 
-揪霸 (Jio Ba) 是一個結合 **LLM 非同步訪談**與**機制設計 (Mechanism Design)** 的 Discord 機器人。透過 LangGraph 打造的狀態機，Jio Ba 能在一對一私訊中溫和地收集參與者的偏好與隱私限制，並利用 Nash Social Welfare (NSW) 演算法計算出 Pareto Optimal 的活動方案，大幅降低主揪的協調成本。
+1. 在伺服器用 `/jio` 建立活動。
+2. 參與者點按鈕加入。
+3. Bot 在 DM 一對一逐題訪談。
+4. 偏題或高風險回覆進入 warning 與 ON_HOLD。
+5. 主揪在 UI 裁決 CONTINUE 或 KICK。
+6. 匯總後輸出候選方案並定案公告。
 
-## ✨ 核心特色 (Features)
+## 主要功能
 
-* **非同步深度訪談：** 利用 Google Gemini API 在背景與參與者私訊，消除群組表態的「從眾效應」。
-* **精準意圖萃取：** 透過 LangGraph 將口語化的自然語言（如：「想找高 CP 值的店，但我絕對不吃羊肉爐」）精準轉換為結構化的 JSON 偏好參數。
-* **防呆與防護機制：** 內建 Gatekeeper 節點阻斷 Prompt Injection，並具備偏題自動拉回 (Reprompt) 功能。
-* **Nash Social Welfare 搓合引擎：** 底層採用公平分配演算法，確保最終方案兼顧整體滿意度與少數人的基本權益。
-* **Discord 原生整合：** 支援 Slash Commands (`/jio`)、互動按鈕、Modals，並能自動建立 Discord Scheduled Events。
+- `/jio` 僅限伺服器使用（不允許在 DM 發起）。
+- 建立活動時有簡單 loading 動畫，完成後替換為主畫面卡片。
+- 支援報名截止、面試截止、最低成團人數。
+- 可根據活動描述與 seeds 產生訪談題目。
+- 同活動可同時訪談多位參與者。
+- 同一參與者訊息會 debounce 與序列化，避免洗訊與狀態衝突。
+- 模糊回答可跨回合累積（draft），減少重複追問死循環。
+- warning 達門檻後進入 ON_HOLD，等待主揪裁決。
+- 參與者有 Confirm/Edit 最終確認流程。
+- 頻道儀表板即時更新參與者狀態。
+- 可匯出活動狀態 JSON。
 
-## 🧠 系統架構 (Architecture)
+## 目前指令
 
-本專案核心對話流程由 **LangGraph** 驅動，定義了嚴謹的 `InterviewState` 傳遞於各節點：
+- `/jio`
+   發起活動。
+- `/verdict`
+   開啟 ON_HOLD 裁決介面。
+- `/export_status`
+   匯出活動狀態 JSON。
 
-1.  `GatekeeperNode`: 惡意指令攔截與安全過濾。
-2.  `ExtractorNode`: 語意解析與 JSON 偏好提取。
-3.  `ToolNode`: (規劃中) 串接 Google Places API 進行實體地點檢索。
-4.  `RepromptNode`: 處理偏題與安撫使用者情緒。
-5.  `NSWCalculatorNode`: Deadline 觸發，執行數學最佳化搓合。
+## 流程概覽
 
-### 數學模型：Nash Social Welfare (NSW)
+1. 主揪在伺服器執行 `/jio`。
+2. Bot 顯示建立表單，並發出活動卡（Join + 管理選單）。
+3. 參與者加入後進入面試狀態。
+4. Bot 於 DM 先送題目總覽，再逐題訪談。
+5. 狀態在 `PENDING`、`INTERVIEWING`、`READY`、`ON_HOLD`、`KICKED` 間轉移。
+6. ON_HOLD 由主揪裁決繼續或移出。
+7. 產生候選方案後由主揪定案與公告。
 
-有別於容易犧牲少數的多數決，或適用於不可分割物品的 EF1 演算法，Jio Ba 將公共活動視為聯合決策，透過最大化所有參與者效用 $u_i(x)$ 的乘積來尋找最佳方案 $x^*$：
+## 架構與模組
 
-$$x^* = \arg\max_{x \in X} \prod_{i=1}^{n} u_i(x)$$
+- `main.py`
+   啟動機器人、檢查環境變數、載入 cogs。
+- `cogs/jio.py`
+   Slash Commands、Discord UI、活動儀表板、流程編排。
+- `cogs/ai_brain.py`
+   佇列、debounce、呼叫 LangGraph。
+- `cogs/graph_agent.py`
+   訪談圖節點：gatekeeper、extractor、reprompt、finalize、hold、malicious。
+- `cogs/db.py`
+   MongoDB CRUD 與狀態遷移。
+- `cogs/matching/nsw_calculator.py`
+   候選方案評分與排序。
 
-*效用計算範例：* 若方案踩中參與者的絕對雷區 (Dealbreakers)，演算法將賦予極小值 $\epsilon$ 以產生嚴厲懲罰，迫使系統尋找 Pareto Optimal 的替代方案。
+## 資料重點
 
-## 🛠️ 開發與安裝指南 (Getting Started)
+- Event 會儲存活動資訊、訪談題組、參與者清單、warning policy、workflow 狀態。
+- Participant interview 會儲存：
+   `current_question_id`、`answers`、`draft_answers`、`revision_count`、`confirmed`、`completed`。
 
-### 先決條件 (Prerequisites)
-* Python 3.10+
-* Discord Developer Portal Bot Token
-* Google Gemini API Key
+## 環境需求
 
-### 環境建置 (Setup)
+- Python `>=3.10,<3.11`
+- MongoDB
+- Discord Bot Token
+- Google API Key（Gemini）
 
-1. **複製專案 (Clone the repository)**
-   ```bash
-   git clone [https://github.com/yourusername/jio-ba-bot.git](https://github.com/yourusername/jio-ba-bot.git)
-   cd jio-ba-bot
-   ```
+## 環境變數
 
-2. **建立虛擬環境與安裝依賴 (Install dependencies)**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-   *(主要套件包含：`discord.py`, `langgraph`, `langchain-google-genai`, `pydantic`, `python-dotenv`)*
+請在 `.env` 設定：
 
-3. **設定環境變數 (Environment Variables)**
-   複製 `.env.example` 並重新命名為 `.env`，填入你的金鑰：
-   ```env
-   DISCORD_TOKEN=your_discord_bot_token_here
-   GEMINI_API_KEY=your_gemini_api_key_here
-   ```
-
-4. **啟動機器人 (Run the bot)**
-   ```bash
-   python main.py
-   ```
-
-## 💡 使用情境範例 (Use Case Scenario)
-
-**情境：舉辦 15 人的台北泡泡足球與會後聚餐**
-
-1.  **發起：** 主揪在頻道輸入 `/jio 目的: 15人泡泡足球與期末聚餐 期限: 明晚8點`。
-2.  **上車：** 15 位成員點擊頻道中的 [我要參加] 按鈕。
-3.  **訪談：** Jio Ba 分別私訊 15 人。
-    * *成員 A 說：* 「運動完想吃點高 CP 值的東西補充體力。」 ➡️ 記錄預算與風格偏好。
-    * *成員 B 說：* 「我對羊肉嚴重過敏，絕對不能吃羊肉爐。」 ➡️ 記錄至 `dealbreakers`。
-4.  **搓合：** 期限到達，Jio Ba 計算出 NSW 最高的分數，並向主揪提交「幕僚報告」。
-5.  **定案：** 主揪點擊確認，Jio Ba 自動在頻道發佈公告並建立 Discord 官方活動。
-
-
----
-*Built with ❤️ for better gathering experiences.*
+```env
+DISCORD_TOKEN=你的_discord_token
+MONGO_URI=你的_mongodb_uri
+GOOGLE_API_KEY=你的_google_api_key
+GOOGLE_API_ENDPOINT=https://generativelanguage.googleapis.com
 ```
+
+可選：
+
+```env
+GEMINI_MODEL_NAME=gemini-2.0-flash
+```
+
+## 本機啟動
+
+```bash
+python -m venv .venv
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python main.py
+```
+
+## PM2 部署
+
+專案內含 `ecosystem.config.js`：
+
+```bash
+pm2 start ecosystem.config.js
+pm2 logs
+pm2 save
+```
+
+## 運維備註
+
+- 需開啟 Message Content Intent 才能完整使用 DM 訪談能力。
+- 權限不足時，啟動流程可能切換到 limited mode。
+- 為降低跨活動混線，系統目前限制每位使用者單一有效面試上下文。
+
+## 測試與工具腳本
+
+倉庫內可用工具：
+
+- `test_llm_connection.py`
+- `test_google_search.py`
+- `verify_agent.py`
+- `show_cost.py`
+- `inspect_genai.py`
+
+## 授權
+
+若專案包含授權檔，請以該檔案為準。
 
