@@ -177,7 +177,6 @@ class JioCreationModal(discord.ui.Modal):
         default_signup_time=None,
         default_interview_time=None,
         default_min_participants=None,
-        default_custom_question=None,
         *args,
         **kwargs,
     ):
@@ -185,7 +184,6 @@ class JioCreationModal(discord.ui.Modal):
         self.bot = bot
         self.channel_id = chan_id
         self.default_min_participants = default_min_participants
-        self.default_custom_question = str(default_custom_question or "").strip()
         
         self.add_item(discord.ui.InputText(
             label="活動標題",
@@ -268,7 +266,7 @@ class JioCreationModal(discord.ui.Modal):
 
         # Prepare description
         final_description = parsed_brief if parsed_brief else "（由參與者訪談共同完善）"
-        custom_questions = [self.default_custom_question] if self.default_custom_question else []
+        custom_questions = []
 
         now = datetime.datetime.utcnow()
         signup_deadline = now + datetime.timedelta(minutes=signup_limit) if signup_limit else None
@@ -306,7 +304,7 @@ class JioCreationModal(discord.ui.Modal):
         
         # 2. Prepare Embed
         embed_title = f"🎯 活動: {title}"
-        embed_desc = f"{final_description}\n\n**最終決策**: 由主揪裁決\n\n點擊下方按鈕加入！"
+        embed_desc = f"{final_description}\n\n點擊下方按鈕加入！"
 
         if signup_deadline:
             ts = int(signup_deadline.replace(tzinfo=datetime.timezone.utc).timestamp())
@@ -341,7 +339,7 @@ class JioCreationModal(discord.ui.Modal):
 
 
 class JioEditModal(discord.ui.Modal):
-    def __init__(self, bot, event_id, current_title, current_desc, current_time, *args, **kwargs):
+    def __init__(self, bot, event_id, current_title, current_desc, current_time, current_custom="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = bot
         self.event_id = event_id
@@ -361,11 +359,30 @@ class JioEditModal(discord.ui.Modal):
         ))
         
         self.add_item(discord.ui.InputText(
-            label="等待時間 (分鐘) - 修改將重置截止時間",
-            value=str(current_time) if current_time else "",
-            placeholder="留空則不變更 (若原無截止則保持無)",
+            label="報名截止時間(分鐘，選填)",
+            value=str(current_time) if current_time else None,
+            placeholder="留空則不變更",
             style=discord.InputTextStyle.short,
-            required=False
+            required=False,
+            min_length=0,
+        ))
+
+        self.add_item(discord.ui.InputText(
+            label="面試截止時間(分鐘，選填)",
+            value=None,
+            placeholder="留空則不變更",
+            style=discord.InputTextStyle.short,
+            required=False,
+            min_length=0,
+        ))
+
+        self.add_item(discord.ui.InputText(
+            label="自訂問題（選填，最多1題）",
+            value=str(current_custom or ""),
+            placeholder="留空代表移除自訂問題",
+            style=discord.InputTextStyle.long,
+            required=False,
+            min_length=0,
         ))
         
     async def callback(self, interaction: discord.Interaction):
@@ -373,32 +390,61 @@ class JioEditModal(discord.ui.Modal):
         
         new_title = self.children[0].value
         new_desc = self.children[1].value
-        time_input = self.children[2].value
+        signup_input = self.children[2].value
+        interview_input = self.children[3].value
+        custom_input = self.children[4].value
         
         db = self.bot.get_cog("Database")
+        event = await db.get_event(self.event_id)
             
         update_data = {
             "title": new_title,
             "description": new_desc if new_desc else "（由大家討論決定）",
         }
         
-        # Handle time limit
-        if time_input:
+        if str(signup_input or "").strip():
             try:
-                minutes = int(time_input)
-                import datetime
+                minutes = int(str(signup_input).strip())
                 new_deadline = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
                 update_data["signup_deadline"] = new_deadline
-                
-                # Update task
-                jio_cog = self.bot.get_cog("Jio")
-                if jio_cog:
-                    self.bot.loop.create_task(jio_cog.close_event_after(self.event_id, minutes * 60))
-                    
             except ValueError:
-                await interaction.followup.send("❌ 時間格式錯誤，僅已更新其他設定。", ephemeral=True)
+                await interaction.followup.send("❌ 報名截止時間格式錯誤，僅已更新其他設定。", ephemeral=True)
+
+        if str(interview_input or "").strip():
+            try:
+                minutes = int(str(interview_input).strip())
+                update_data["interview_deadline"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
+            except ValueError:
+                await interaction.followup.send("❌ 面試截止時間格式錯誤，僅已更新其他設定。", ephemeral=True)
+
+        custom_question = str(custom_input or "").strip()
+        update_data["host_custom_questions"] = [custom_question] if custom_question else []
+
+        if event and event.get("active", True):
+            seeds = event.get("activity_seeds", {}) or {}
+            rebuilt_questions = await db._build_interview_questions(
+                title=new_title,
+                description=update_data["description"],
+                seeds=seeds,
+                custom_questions=update_data["host_custom_questions"],
+            )
+            update_data["interview_questions"] = rebuilt_questions
         
         await db.events.update_one({"_id": self.event_id}, {"$set": update_data})
+
+        if event and event.get("active", True):
+            first_qid = (update_data.get("interview_questions") or [{}])[0].get("id") if update_data.get("interview_questions") else None
+            if first_qid:
+                await db.events.update_one(
+                    {"_id": self.event_id},
+                    {"$set": {"participants.$[elem].interview.current_question_id": first_qid}},
+                    array_filters=[{"elem.status": {"$in": ["PENDING", "INTERVIEWING"]}}],
+                )
+
+        if str(signup_input or "").strip():
+            jio_cog = self.bot.get_cog("Jio")
+            if jio_cog:
+                self.bot.loop.create_task(jio_cog.close_event_after(self.event_id, int(str(signup_input).strip()) * 60))
         
         # Update Dashboard
         jio_cog = self.bot.get_cog("Jio")
@@ -409,7 +455,7 @@ class JioEditModal(discord.ui.Modal):
 
 
 class ManageSelect(discord.ui.Select):
-    def __init__(self, bot, event_id):
+    def __init__(self, bot, event_id, include_progress=False):
         self.bot = bot
         self.event_id = event_id
         
@@ -423,7 +469,7 @@ class ManageSelect(discord.ui.Select):
             discord.SelectOption(
                 label="編輯設定 (Edit Settings)", 
                 value="EDIT_SETTINGS", 
-                description="[發起人] 修改標題、說明或截止時間",
+                description="[發起人] 修改標題、說明、時間與自訂問題",
                 emoji="⚙️"
             ),
             discord.SelectOption(
@@ -439,6 +485,17 @@ class ManageSelect(discord.ui.Select):
                 emoji="🛑"
             ),
         ]
+
+        if include_progress:
+            options.insert(
+                2,
+                discord.SelectOption(
+                    label="查看面試進度 (Interview Progress)",
+                    value="VIEW_PROGRESS",
+                    description="[發起人] 查看每位參與者目前面試進度",
+                    emoji="📊"
+                ),
+            )
         
         super().__init__(
             placeholder="管理選單 (Management Menu)...",
@@ -465,13 +522,9 @@ class ManageSelect(discord.ui.Select):
             if user_id != initiator_id:
                 await interaction.response.send_message("⛔ 只有發起人可以執行此操作。", ephemeral=True)
                 return
-            
-            jio_cog = self.bot.get_cog("Jio")
-            if jio_cog:
-                # Defer first
-                await interaction.response.defer(ephemeral=True)
-                await jio_cog.start_interview_phase(self.event_id, manual_trigger_user=interaction.user)
-                await interaction.followup.send("✅ 已提前截止並開始面試！", ephemeral=True)
+
+            view = EndEarlyChoiceView(self.bot, self.event_id)
+            await interaction.response.send_message("請選擇要提早結束報名或提早結束面試。", view=view, ephemeral=True)
                 
         elif value == "EDIT_SETTINGS":
              # Host Only
@@ -485,10 +538,24 @@ class ManageSelect(discord.ui.Select):
                 self.event_id,
                 current_title=event.get("title", ""),
                 current_desc=event.get("description", ""),
-                current_time=None, # Hard to calc remaining time, user sets NEW time
+                current_time=None,
+                current_custom=(event.get("host_custom_questions", [""]) or [""])[0],
                 title="編輯活動設定"
             )
             await interaction.response.send_modal(modal)
+
+        elif value == "VIEW_PROGRESS":
+            if user_id != initiator_id:
+                await interaction.response.send_message("⛔ 只有發起人可以查看面試進度。", ephemeral=True)
+                return
+            if event.get("active", True):
+                await interaction.response.send_message("目前仍在報名階段，面試尚未開始。", ephemeral=True)
+                return
+
+            jio_cog = self.bot.get_cog("Jio")
+            if jio_cog:
+                embed = await jio_cog.build_interview_progress_embed(self.event_id)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif value == "REVIEW_HOLD":
             if user_id != initiator_id:
@@ -513,7 +580,7 @@ class JoinView(View):
         super().__init__(timeout=None) # Persistent view
         self.bot = bot
         self.event_id = event_id
-        self.add_item(ManageSelect(bot, event_id))
+        self.add_item(ManageSelect(bot, event_id, include_progress=False))
 
 
     @discord.ui.button(label="✋ 我要參加 (Join)", style=discord.ButtonStyle.green, custom_id="join_btn")
@@ -616,16 +683,17 @@ class CancelEventModal(discord.ui.Modal):
             await interaction.followup.send("❌ 取消失敗，請稍後再試。", ephemeral=True)
 
 
-class HoldKickReasonModal(discord.ui.Modal):
-    def __init__(self, bot, event_id, target_user_id, *args, **kwargs):
+class HoldVerdictReasonModal(discord.ui.Modal):
+    def __init__(self, bot, event_id, target_user_id, verdict, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = bot
         self.event_id = event_id
         self.target_user_id = target_user_id
+        self.verdict = verdict
 
         self.add_item(discord.ui.InputText(
-            label="移出原因",
-            placeholder="請填寫移出原因",
+            label="裁決原因（必填）",
+            placeholder="請填寫裁決原因",
             style=discord.InputTextStyle.long,
             required=True,
         ))
@@ -637,7 +705,8 @@ class HoldKickReasonModal(discord.ui.Modal):
             return
 
         await interaction.response.defer(ephemeral=True)
-        ok = await db.apply_host_verdict(self.event_id, self.target_user_id, "KICK", reason=self.children[0].value)
+        reason = self.children[0].value
+        ok = await db.apply_host_verdict(self.event_id, self.target_user_id, self.verdict, reason=reason)
         if not ok:
             await interaction.followup.send("❌ 裁決失敗", ephemeral=True)
             return
@@ -651,7 +720,10 @@ class HoldKickReasonModal(discord.ui.Modal):
 
         if target:
             try:
-                await target.send(f"主揪已裁決你離開活動。理由：{self.children[0].value}")
+                if self.verdict == "KICK":
+                    await target.send(f"主揪已裁決你離開活動。理由：{reason}")
+                else:
+                    await target.send(f"主揪已裁決你可繼續訪談。理由：{reason}")
             except Exception:
                 pass
 
@@ -659,7 +731,40 @@ class HoldKickReasonModal(discord.ui.Modal):
         if jio_cog:
             await jio_cog.update_dashboard(self.event_id)
 
-        await interaction.followup.send("✅ 已移出該參與者。", ephemeral=True)
+        if self.verdict == "KICK":
+            await interaction.followup.send("✅ 已移出該參與者。", ephemeral=True)
+        else:
+            await interaction.followup.send("✅ 已裁決為可繼續訪談。", ephemeral=True)
+
+
+class HoldVerdictActionView(View):
+    def __init__(self, bot, event_id, target_user_id):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.event_id = event_id
+        self.target_user_id = target_user_id
+
+    @discord.ui.button(label="裁決繼續 (CONTINUE)", style=discord.ButtonStyle.green)
+    async def continue_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        modal = HoldVerdictReasonModal(
+            self.bot,
+            self.event_id,
+            self.target_user_id,
+            "CONTINUE",
+            title="裁決為繼續",
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="裁決移出 (KICK)", style=discord.ButtonStyle.red)
+    async def kick_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        modal = HoldVerdictReasonModal(
+            self.bot,
+            self.event_id,
+            self.target_user_id,
+            "KICK",
+            title="裁決為移出",
+        )
+        await interaction.response.send_modal(modal)
 
 
 class HoldKickSelect(discord.ui.Select):
@@ -670,7 +775,17 @@ class HoldKickSelect(discord.ui.Select):
         for p in candidates[:25]:
             uid = p.get("user_id")
             label = p.get("display_name") or p.get("name") or f"User {uid}"
-            options.append(discord.SelectOption(label=label[:100], value=str(uid), description="點選後填寫移出原因"))
+            context = p.get("hold_context") or {}
+            question = str(context.get("question") or "").strip()
+            reply = str(context.get("reply") or "").strip()
+            summary = ""
+            if question and reply:
+                summary = f"Q:{question[:35]} | A:{reply[:35]}"
+            elif context.get("participant_reason"):
+                summary = str(context.get("participant_reason"))[:70]
+            else:
+                summary = "點選後裁決 CONTINUE 或 KICK"
+            options.append(discord.SelectOption(label=label[:100], value=str(uid), description=summary[:100]))
 
         super().__init__(
             placeholder="選擇要 KICK 的 ON_HOLD 成員",
@@ -681,8 +796,28 @@ class HoldKickSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         uid = int(self.values[0])
-        modal = HoldKickReasonModal(self.bot, self.event_id, uid, title="移出 ON_HOLD 參與者")
-        await interaction.response.send_modal(modal)
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(self.event_id) if db else None
+        participant = None
+        if event:
+            for p in event.get("participants", []):
+                if p.get("user_id") == uid:
+                    participant = p
+                    break
+
+        hold_context = (participant or {}).get("hold_context", {}) or {}
+        q = str(hold_context.get("question") or "(無)")
+        a = str(hold_context.get("reply") or "(無)")
+        reason = str(hold_context.get("participant_reason") or hold_context.get("reason") or "(無)")
+
+        view = HoldVerdictActionView(self.bot, self.event_id, uid)
+        msg = (
+            f"請選擇裁決動作。\n"
+            f"問題：{q}\n"
+            f"參與者回覆：{a}\n"
+            f"Bot判定：{reason}"
+        )
+        await interaction.response.send_message(msg, view=view, ephemeral=True)
 
 
 class HoldKickView(View):
@@ -694,13 +829,167 @@ class HoldKickView(View):
 class ManageOnlyView(View):
     def __init__(self, bot, event_id):
         super().__init__(timeout=None)
-        self.add_item(ManageSelect(bot, event_id))
+        self.add_item(ManageSelect(bot, event_id, include_progress=True))
+
+
+class DMEventSwitchSelect(discord.ui.Select):
+    def __init__(self, bot, user_id, events):
+        self.bot = bot
+        self.user_id = user_id
+        self.events = events
+        options = []
+        for idx, event in enumerate(events[:25], start=1):
+            options.append(
+                discord.SelectOption(
+                    label=f"{idx}. {event.get('title', '未命名活動')}"[:100],
+                    value=str(event.get("_id")),
+                    description="切換目前訪談活動",
+                )
+            )
+        super().__init__(placeholder="切換目前訪談活動", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        db = self.bot.get_cog("Database")
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("這不是你的切換選單。", ephemeral=True)
+            return
+
+        selected_id = self.values[0]
+        target_event = None
+        for event in self.events:
+            if str(event.get("_id")) == selected_id:
+                target_event = event
+                break
+
+        if not target_event:
+            await interaction.response.send_message("找不到該活動，請重新整理。", ephemeral=True)
+            return
+
+        await db.set_user_active_event(self.user_id, str(target_event.get("_id")))
+        jio_cog = self.bot.get_cog("Jio")
+        detail = await jio_cog.describe_current_interview_state(target_event, self.user_id) if jio_cog else ""
+        await interaction.response.send_message(f"✅ 已切換到活動：{target_event.get('title', '未命名活動')}\n\n{detail}")
+
+
+class DMEventSwitchView(View):
+    def __init__(self, bot, user_id, events):
+        super().__init__(timeout=600)
+        self.add_item(DMEventSwitchSelect(bot, user_id, events))
+
+
+class EndEarlyChoiceView(View):
+    def __init__(self, bot, event_id):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.event_id = event_id
+
+    @discord.ui.button(label="提早結束報名", style=discord.ButtonStyle.blurple)
+    async def end_signup(self, button: discord.ui.Button, interaction: discord.Interaction):
+        jio_cog = self.bot.get_cog("Jio")
+        if not jio_cog:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await jio_cog.start_interview_phase(self.event_id, manual_trigger_user=interaction.user)
+        await interaction.followup.send("✅ 已提前截止報名並開始面試。", ephemeral=True)
+
+    @discord.ui.button(label="提早結束面試", style=discord.ButtonStyle.red)
+    async def end_interview(self, button: discord.ui.Button, interaction: discord.Interaction):
+        jio_cog = self.bot.get_cog("Jio")
+        if not jio_cog:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await jio_cog.end_interview_early(self.event_id, trigger_user=interaction.user)
+        await interaction.followup.send("✅ 已提前結束面試流程。", ephemeral=True)
+
+
+class ConfirmEditQuestionSelect(discord.ui.Select):
+    def __init__(self, bot, event_id, user_id, options):
+        self.bot = bot
+        self.event_id = event_id
+        self.user_id = user_id
+        super().__init__(
+            placeholder="選擇要修改的題目（每題最多改一次）",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("這不是你的修改選單。", ephemeral=True)
+            return
+
+        jio_cog = self.bot.get_cog("Jio")
+        if not jio_cog:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await jio_cog.enter_edit_question_mode(self.event_id, self.user_id, self.values[0], interaction)
+
+
+class ConfirmEditQuestionView(View):
+    def __init__(self, bot, event_id, user_id, options):
+        super().__init__(timeout=600)
+        self.add_item(ConfirmEditQuestionSelect(bot, event_id, user_id, options))
+
+
+class ConfirmSubmissionView(View):
+    def __init__(self, bot, event_id, user_id):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.event_id = event_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+    async def confirm_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("這不是你的確認按鈕。", ephemeral=True)
+            return
+
+        jio_cog = self.bot.get_cog("Jio")
+        if not jio_cog:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await jio_cog.confirm_submission_from_button(self.event_id, self.user_id, interaction)
+
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.blurple)
+    async def edit_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("這不是你的修改按鈕。", ephemeral=True)
+            return
+
+        jio_cog = self.bot.get_cog("Jio")
+        if not jio_cog:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await jio_cog.open_edit_question_selector(self.event_id, self.user_id, interaction)
 
 
 
 class Jio(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    def _remaining_interview_minutes(self, event):
+        deadline = (event or {}).get("interview_deadline")
+        if not deadline:
+            return None
+
+        now = datetime.datetime.utcnow()
+        if getattr(deadline, "tzinfo", None) is not None:
+            now = now.replace(tzinfo=deadline.tzinfo)
+        remaining = int(max(0, (deadline - now).total_seconds() // 60))
+        return remaining
+
         # Inject helper method to Jio instance if needed, or just make it static/mixin.
         # But 'build_context_string' is on View above. Ideally it should be on Cog or helper.
         # I'll duplicate it or move it. For now, let's put it on Cog and call it from View.
@@ -723,6 +1012,126 @@ class Jio(commands.Cog):
             print(f"[DEBUG] Failed to fetch channel {channel_id}: {e}")
         return None
 
+    async def disable_management_view(self, event_id):
+        db = self.bot.get_cog("Database")
+        if not db:
+            return
+
+        event = await db.get_event(event_id)
+        if not event:
+            return
+
+        channel = await self._resolve_channel(event.get("channel_id"))
+        if not channel:
+            return
+
+        message_id = event.get("message_id")
+        if not message_id:
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.edit(view=None)
+        except Exception:
+            pass
+
+    async def build_confirm_submission_view(self, event_id, user_id):
+        return ConfirmSubmissionView(self.bot, event_id, user_id)
+
+    async def confirm_submission_from_button(self, event_id, user_id, interaction: discord.Interaction):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(event_id) if db else None
+        if not event:
+            await interaction.followup.send("找不到活動，請稍後再試。", ephemeral=True)
+            return
+
+        await db.update_participant_interview(
+            event_id,
+            user_id,
+            current_question_id="completed",
+            interview_completed=True,
+            confirmed=True,
+        )
+        await db.update_participant_status(event_id, user_id, "READY")
+        await db.append_history(event_id, user_id, "system", "Participant confirmed final submission.")
+
+        try:
+            await interaction.user.send("✅ 已確認送出你的最終訪談結果。")
+        except Exception:
+            pass
+
+        await self.maybe_trigger_adjudication(event_id)
+        await self.update_dashboard(event_id)
+        await self.log_event_state(event_id)
+        await interaction.followup.send("✅ 已確認送出。", ephemeral=True)
+
+    async def open_edit_question_selector(self, event_id, user_id, interaction: discord.Interaction):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(event_id) if db else None
+        participant = await db.get_participant(event_id, user_id) if db else None
+        if not event or not participant:
+            await interaction.followup.send("找不到面試資料。", ephemeral=True)
+            return
+
+        interview = participant.get("interview", {}) or {}
+        edited_ids = set(interview.get("edited_question_ids", []) or [])
+
+        options = []
+        for idx, question in enumerate(event.get("interview_questions", []) or [], start=1):
+            qid = str(question.get("id") or "")
+            if not qid or qid in edited_ids:
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=f"{idx}. {str(question.get('text') or '')[:90]}",
+                    value=qid,
+                    description="選擇後請直接回覆新答案",
+                )
+            )
+
+        if not options:
+            await interaction.followup.send("你已用完可修改題目（每題最多 1 次）。", ephemeral=True)
+            return
+
+        view = ConfirmEditQuestionView(self.bot, event_id, user_id, options)
+        await interaction.followup.send("請選擇要修改的題目。", view=view, ephemeral=True)
+
+    async def enter_edit_question_mode(self, event_id, user_id, question_id, interaction: discord.Interaction):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(event_id) if db else None
+        participant = await db.get_participant(event_id, user_id) if db else None
+        if not event or not participant:
+            await interaction.followup.send("找不到面試資料。", ephemeral=True)
+            return
+
+        interview = participant.get("interview", {}) or {}
+        edited_ids = list(interview.get("edited_question_ids", []) or [])
+        if question_id in edited_ids:
+            await interaction.followup.send("這一題已修改過，無法再次修改。", ephemeral=True)
+            return
+
+        edited_ids.append(question_id)
+        await db.update_participant_interview(
+            event_id,
+            user_id,
+            current_question_id=question_id,
+            interview_completed=False,
+            confirmed=False,
+            edited_question_ids=edited_ids,
+        )
+        await db.update_participant_status(event_id, user_id, "INTERVIEWING")
+        await db.set_participant_reply_status(event_id, user_id, "WAITING_FOR_REPLY")
+
+        question_text = ""
+        for question in event.get("interview_questions", []) or []:
+            if str(question.get("id")) == str(question_id):
+                question_text = str(question.get("text") or "")
+                break
+
+        remain = self._remaining_interview_minutes(event)
+        tip = f"\n⏳ 面試剩餘時間：約 {remain} 分鐘" if remain is not None else ""
+        await interaction.followup.send(f"請修改這一題答案：{question_text}{tip}", ephemeral=True)
+
     async def cancel_event_with_announcement(self, event_id, cancelled_by, reason="", source="HOST"):
         db = self.bot.get_cog("Database")
         if not db:
@@ -744,7 +1153,119 @@ class Jio(commands.Cog):
             except Exception:
                 pass
 
+        await self.disable_management_view(event_id)
+
         return True
+
+    async def describe_current_interview_state(self, event, user_id):
+        questions = event.get("interview_questions", []) or []
+        participant = None
+        for p in event.get("participants", []):
+            if p.get("user_id") == user_id:
+                participant = p
+                break
+
+        if not participant:
+            return "目前未找到你的參與狀態。"
+
+        interview = participant.get("interview", {}) or {}
+        current_qid = interview.get("current_question_id")
+        qmap = {str(q.get("id")): q for q in questions}
+
+        if current_qid == "confirm_submit":
+            return "你目前在最後確認階段。請使用下方按鈕 Confirm 或 Edit。"
+
+        if current_qid == "completed" or interview.get("completed"):
+            return "你目前已完成面試。"
+
+        current_idx = 1
+        total = max(1, len(questions))
+        current_question_text = ""
+        for idx, question in enumerate(questions, start=1):
+            if str(question.get("id")) == str(current_qid):
+                current_idx = idx
+                current_question_text = str(question.get("text") or "")
+                break
+
+        if not current_question_text and questions:
+            current_question_text = str(questions[0].get("text") or "")
+
+        return f"目前進度：第 {current_idx}/{total} 題\n目前題目：{current_question_text or '尚未開始'}"
+
+    async def build_interview_progress_embed(self, event_id):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(event_id)
+        embed = discord.Embed(
+            title=f"📊 面試進度 | {event.get('title', '未命名活動') if event else '活動'}",
+            color=0x3498db,
+        )
+        if not event:
+            embed.description = "找不到活動。"
+            return embed
+
+        questions = event.get("interview_questions", []) or []
+        total = max(1, len(questions))
+        qids = [str(q.get("id")) for q in questions]
+
+        lines = []
+        for participant in event.get("participants", []):
+            uid = participant.get("user_id")
+            user = self.bot.get_user(uid)
+            name = user.display_name if user else f"User {uid}"
+            interview = participant.get("interview", {}) or {}
+            current_qid = str(interview.get("current_question_id") or "")
+            completed = bool(interview.get("completed"))
+
+            if completed or current_qid == "completed":
+                ratio = f"{total}/{total}"
+                status = "✅"
+            elif current_qid == "confirm_submit":
+                ratio = f"{total}/{total}"
+                status = "📝確認中"
+            else:
+                idx = 1
+                if current_qid in qids:
+                    idx = qids.index(current_qid) + 1
+                ratio = f"{idx}/{total}"
+                status = participant.get("status", "UNKNOWN")
+
+            lines.append(f"- {name}: {ratio} ({status})")
+
+        embed.description = "\n".join(lines) if lines else "尚無參與者。"
+        return embed
+
+    async def end_interview_early(self, event_id, trigger_user=None):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(event_id)
+        if not event:
+            return
+
+        kicked_ids = await db.auto_kick_interview_overdue(event_id)
+        failed_event = await db.fail_event_min_participants_by_ready(event_id)
+        channel = await self._resolve_channel(event.get("channel_id"))
+
+        if failed_event:
+            if channel:
+                try:
+                    await channel.send(
+                        f"❌ 活動 **{failed_event.get('title', '未命名活動')}** 取消：{failed_event.get('cancel_reason')}"
+                    )
+                except Exception:
+                    pass
+            await self.disable_management_view(event_id)
+            await self.update_dashboard(event_id)
+            return
+
+        if channel:
+            try:
+                opener = f"⚡ {trigger_user.mention} 已提早結束面試。" if trigger_user else "⚡ 已提早結束面試。"
+                suffix = f"\n以下成員因未完成訪談而移出：{' '.join([f'<@{uid}>' for uid in kicked_ids])}" if kicked_ids else ""
+                await channel.send(opener + suffix)
+            except Exception:
+                pass
+
+        await self.maybe_trigger_adjudication(event_id)
+        await self.update_dashboard(event_id)
 
     async def open_hold_review_ui(self, event_id, interaction: discord.Interaction):
         db = self.bot.get_cog("Database")
@@ -775,6 +1296,7 @@ class Jio(commands.Cog):
                 {
                     "user_id": uid,
                     "display_name": user.display_name if user else f"User {uid}",
+                    "hold_context": p.get("hold_context") or {},
                 }
             )
 
@@ -814,7 +1336,8 @@ class Jio(commands.Cog):
             qtext = str(question.get("text") or "").strip()
             if not qtext:
                 continue
-            question_lines.append(f"{idx}. {qtext}")
+            marker = "➡️ " if idx == 1 else ""
+            question_lines.append(f"{marker}{idx}. {qtext}")
 
         question_overview = "\n".join(question_lines) if question_lines else "本活動無需額外提問。"
         if len(question_overview) > 1000:
@@ -852,7 +1375,9 @@ class Jio(commands.Cog):
                     )
                     await db.update_participant_status(event_id, uid, "INTERVIEWING")
                     await db.set_participant_reply_status(event_id, uid, "WAITING_FOR_REPLY")
-                    await user.send(f"第 1 題：{first_question.get('text', '')}")
+                    remaining = self._remaining_interview_minutes(event)
+                    remain_tip = f"\n⏳ 面試剩餘時間：約 {remaining} 分鐘" if remaining is not None else ""
+                    await user.send(f"➡️ 第 1 題：{first_question.get('text', '')}{remain_tip}")
                 else:
                     await db.update_participant_interview(
                         event_id,
@@ -1139,15 +1664,23 @@ class Jio(commands.Cog):
             }
         )
 
+        await self.disable_management_view(event_id)
+
         channel = await self._resolve_channel(event.get("channel_id"))
         if channel:
             candidate = selected.get("candidate", {})
+            ready_mentions = []
+            for p in event.get("participants", []):
+                if p.get("status") == "READY":
+                    ready_mentions.append(f"<@{p.get('user_id')}>")
             announce_text = (
                 f"📢 **揪霸 (Jio Ba) 最終方案出爐!**\n"
                 f"{candidate.get('what')}｜{candidate.get('where')}｜{candidate.get('when')}｜執行方式 {candidate.get('budget')}"
             )
             if scheduled_event_id:
                 announce_text += f"\n已建立 Discord Event (ID: {scheduled_event_id})"
+                if ready_mentions:
+                    announce_text += "\n請以下通過面試的成員前往活動事件按 Interested：\n" + " ".join(ready_mentions)
             await channel.send(announce_text)
 
         if interaction:
@@ -1208,6 +1741,7 @@ class Jio(commands.Cog):
                     )
                 except Exception:
                     pass
+            await self.disable_management_view(event_id)
             await self.log_event_state(event_id)
             return
         
@@ -1316,7 +1850,7 @@ class Jio(commands.Cog):
 
         title_text = event.get("title", "未命名活動")
         desc_text = event.get("description", "（由參與者訪談共同完善）")
-        desc_text += "\n\n**最終決策**: 由主揪裁決\n\n點擊下方按鈕加入！"
+        desc_text += "\n\n點擊下方按鈕加入！"
 
         if event.get("cancelled"):
             desc_text += f"\n\n🛑 **活動已取消**: {event.get('cancel_reason') or '未提供原因'}"
@@ -1401,7 +1935,6 @@ class Jio(commands.Cog):
         signup_limit: int = discord.Option(int, "報名截止分鐘 (選填)", default=None, required=False),
         interview_limit: int = discord.Option(int, "面試截止分鐘 (選填)", default=None, required=False),
         min_participants: int = discord.Option(int, "最低成團人數 (選填)", default=None, required=False),
-        custom_question: str = discord.Option(str, "自訂問題 (選填，最多1題)", default=None, required=False),
     ):
         modal = JioCreationModal(
             self.bot, 
@@ -1411,7 +1944,6 @@ class Jio(commands.Cog):
             default_signup_time=signup_limit,
             default_interview_time=interview_limit,
             default_min_participants=min_participants,
-            default_custom_question=custom_question,
         )
         await ctx.send_modal(modal)
 
@@ -1453,6 +1985,7 @@ class Jio(commands.Cog):
                     )
                 except Exception:
                     pass
+            await self.disable_management_view(event_id)
             await self.update_dashboard(event_id)
             await self.log_event_state(event_id)
             return
@@ -1584,6 +2117,20 @@ class Jio(commands.Cog):
             db = self.bot.get_cog("Database")
             brain = self.bot.get_cog("AIBrain")
 
+            candidate_events = await self.collect_candidate_events_for_user(message.author.id)
+            selected_idx = parse_event_selection(message.content)
+            if selected_idx is not None and len(candidate_events) > 1:
+                if 1 <= selected_idx <= len(candidate_events):
+                    chosen = candidate_events[selected_idx - 1]
+                    await db.set_user_active_event(message.author.id, str(chosen.get("_id")))
+                    detail = await self.describe_current_interview_state(chosen, message.author.id)
+                    await message.author.send(
+                        f"✅ 已切換活動：{chosen.get('title', '未命名活動')}\n\n{detail}\n\n請繼續回答目前問題。"
+                    )
+                else:
+                    await message.author.send("❌ 無效的活動編號，請回覆正確數字。")
+                return
+
             resolved = await self.resolve_event_for_dm(message.author.id, message.content)
             if resolved is None:
                 return
@@ -1597,7 +2144,8 @@ class Jio(commands.Cog):
                 for idx, item in enumerate(resolved, start=1):
                     lines.append(f"{idx}. {item.get('title', '未命名活動')}")
                 lines.append("回覆數字即可，例如：1")
-                await message.author.send("\n".join(lines))
+                view = DMEventSwitchView(self.bot, message.author.id, resolved)
+                await message.author.send("\n".join(lines), view=view)
                 return
 
             event = resolved

@@ -178,9 +178,8 @@ python test_google_search.py
 
 1. 先讀需求，再找對應模組，最後修改。
 2. 禁止直接改動無關檔案。
-3. 不可移除安全檢查來換取流程順暢。
-4. 若需求與現有架構衝突，先提出風險與替代方案。
-5. 交付訊息需包含：
+3. 若需求與現有架構衝突，先提出風險與替代方案。
+4. 交付訊息需包含：
     - 修改檔案清單
     - 行為變更摘要
     - 已執行測試與結果
@@ -197,7 +196,7 @@ python test_google_search.py
 
 ---
 
-## 13. 已知實作細節 (請勿誤改)
+## 13. 已知實作細節
 
 1. py-cord 2.7.1 的 Scheduled Event 參數需使用 `Guild.create_scheduled_event(location=..., privacy_level=discord.ScheduledEventPrivacyLevel.guild_only)`。
 2. `discord.EntityType` 與 `discord.PrivacyLevel` 在本環境不可用，勿直接替換 enum 寫法。

@@ -253,6 +253,7 @@ def get_dinner_tools(bot):
             uid = msg.get("user_id")
             content = msg.get("content")
             embed_payload = msg.get("embed")
+            confirm_ui = bool(msg.get("confirm_ui"))
             if not uid or not content: 
                 results.append(f"Skipped invalid msg: {msg}")
                 continue
@@ -273,11 +274,17 @@ def get_dinner_tools(bot):
             try:
                 target_user = await bot.fetch_user(uid)
                 if target_user:
+                    view = None
+                    if confirm_ui:
+                        jio_cog = bot.get_cog("Jio")
+                        if jio_cog:
+                            view = await jio_cog.build_confirm_submission_view(oid, uid)
+
                     if embed_payload and isinstance(embed_payload, dict):
                         embed = discord.Embed.from_dict(embed_payload)
-                        await target_user.send(content=content, embed=embed)
+                        await target_user.send(content=content, embed=embed, view=view)
                     else:
-                        await target_user.send(content)
+                        await target_user.send(content, view=view)
                     if db:
                         # Update Reply Status
                         await db.set_participant_reply_status(oid, uid, "WAITING_FOR_REPLY")

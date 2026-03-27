@@ -1,4 +1,5 @@
 import json
+import datetime
 import os
 import re
 from typing import Any, Dict, List, Tuple
@@ -44,6 +45,17 @@ def _question_lookup(questions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any
     return {str(item.get("id")): item for item in questions or [] if item.get("id")}
 
 
+def _remaining_minutes(event: Dict[str, Any]) -> int:
+    deadline = (event or {}).get("interview_deadline")
+    if not deadline:
+        return -1
+
+    now = datetime.datetime.utcnow()
+    if getattr(deadline, "tzinfo", None) is not None:
+        now = now.replace(tzinfo=deadline.tzinfo)
+    return int(max(0, (deadline - now).total_seconds() // 60))
+
+
 def _render_form(questions: List[Dict[str, Any]], answers: Dict[str, Any]) -> str:
     lines = ["🧾 Interview Form", ""]
     for idx, question in enumerate(questions or [], start=1):
@@ -55,7 +67,7 @@ def _render_form(questions: List[Dict[str, Any]], answers: Dict[str, Any]) -> st
     return "\n".join(lines)
 
 
-def _render_form_embed(questions: List[Dict[str, Any]], answers: Dict[str, Any]) -> Dict[str, Any]:
+def _render_form_embed(questions: List[Dict[str, Any]], answers: Dict[str, Any], current_question_id: str = "") -> Dict[str, Any]:
     fields = []
     for idx, question in enumerate(questions or [], start=1):
         qid = str(question.get("id"))
@@ -63,9 +75,10 @@ def _render_form_embed(questions: List[Dict[str, Any]], answers: Dict[str, Any])
         avalue = str(answers.get(qid) or "(未填)")
         if len(avalue) > 900:
             avalue = avalue[:880] + "..."
+        marker = "➡️ " if current_question_id and str(current_question_id) == qid else ""
         fields.append(
             {
-                "name": f"{idx}. {qtext}"[:256],
+                "name": f"{marker}{idx}. {qtext}"[:256],
                 "value": avalue,
                 "inline": False,
             }
@@ -73,7 +86,7 @@ def _render_form_embed(questions: List[Dict[str, Any]], answers: Dict[str, Any])
 
     return {
         "title": "🧾 Interview Form",
-        "description": "目前已記錄的訪談答案",
+        "description": "目前已記錄的訪談答案（➡️ 為目前題目）",
         "color": 0x5865F2,
         "fields": fields[:25],
     }
@@ -193,12 +206,97 @@ def create_graph(bot):
 
         question_map = _question_lookup(questions)
         current_question_id = normalize_question_id(current_question_id, questions)
+        warning_threshold = int((((event or {}).get("warning_policy", {}) or {}).get("threshold", 5)) if event else 5)
+        remaining_minutes = _remaining_minutes(event or {}) if event else -1
 
         if current_question_id == "completed":
             interview_completed = True
 
+        confirm_submit = False
+
+        if current_question_id == "confirm_submit":
+            lowered = str(user_text or "").strip().lower()
+            is_confirm = lowered in {"confirm", "確認", "送出", "提交", "yes", "ok"}
+            revision_target_qid, revision_value = _parse_revision_update(user_text, questions)
+
+            if is_confirm:
+                return {
+                    "user_id": str(user_id),
+                    "current_question_id": "completed",
+                    "answers": answers,
+                    "questions": questions,
+                    "dealbreakers": dealbreakers,
+                    "extracted": {
+                        "assistant_reply": "已收到確認，將送出你的面試結果。",
+                        "private_note": "",
+                    },
+                    "warning_count": 0,
+                    "route": "finalize",
+                    "malicious_reason": "",
+                    "warn_issued": False,
+                    "warning_user_reason": "",
+                    "warning_threshold": warning_threshold,
+                    "remaining_minutes": remaining_minutes,
+                    "reprompt_reason": "",
+                    "interview_completed": interview_completed,
+                    "revision_count": revision_count,
+                    "revision_target_qid": "",
+                    "revision_attempt": False,
+                    "confirm_submit": True,
+                }
+
+            if revision_target_qid and is_sufficient_answer(revision_value) and revision_count < 1:
+                answers[str(revision_target_qid)] = revision_value
+                return {
+                    "user_id": str(user_id),
+                    "current_question_id": "confirm_submit",
+                    "answers": answers,
+                    "questions": questions,
+                    "dealbreakers": dealbreakers,
+                    "extracted": {
+                        "assistant_reply": "已更新你的修訂內容。請再次確認是否送出。回覆 confirm 即可送出。",
+                        "private_note": "",
+                    },
+                    "warning_count": 0,
+                    "route": "finalize",
+                    "malicious_reason": "",
+                    "warn_issued": False,
+                    "warning_user_reason": "",
+                    "warning_threshold": warning_threshold,
+                    "remaining_minutes": remaining_minutes,
+                    "reprompt_reason": "",
+                    "interview_completed": interview_completed,
+                    "revision_count": revision_count + 1,
+                    "revision_target_qid": revision_target_qid,
+                    "revision_attempt": True,
+                    "confirm_submit": False,
+                }
+
+            return {
+                "user_id": str(user_id),
+                "current_question_id": "confirm_submit",
+                "answers": answers,
+                "questions": questions,
+                "dealbreakers": dealbreakers,
+                "extracted": {"assistant_reply": "", "private_note": ""},
+                "warning_count": 0,
+                "route": "reprompt",
+                "malicious_reason": "confirm_submit_pending",
+                "warn_issued": False,
+                "warning_user_reason": "",
+                "warning_threshold": warning_threshold,
+                "remaining_minutes": remaining_minutes,
+                "reprompt_reason": "請回覆 confirm 送出，或用 `題號: 新答案`（僅可修改一次）",
+                "interview_completed": interview_completed,
+                "revision_count": revision_count,
+                "revision_target_qid": "",
+                "revision_attempt": False,
+                "confirm_submit": False,
+            }
+
         current_question = question_map.get(str(current_question_id or ""), {})
         current_question_text = current_question.get("text", "目前沒有待回答問題")
+        current_question_topic = str(current_question.get("topic") or "")
 
         extraction_prompt = f"""
 你是活動訪談資料整理器，請根據目前問題判斷使用者回答是否充分，並輸出 JSON。
@@ -238,6 +336,13 @@ def create_graph(bot):
         off_topic = bool(parsed.get("off_topic"))
         reprompt_reason = str(parsed.get("missing_reason") or "").strip()
 
+        if current_question_topic == "custom" and not interview_completed:
+            extracted_answer = str(user_text or "").strip()
+            sufficient = bool(extracted_answer)
+            off_topic = False
+            reprompt_reason = ""
+            parsed["assistant_reply"] = "已記錄你的自訂題回答。"
+
         revision_target_qid = ""
         revision_value = ""
         if interview_completed:
@@ -266,7 +371,9 @@ def create_graph(bot):
             warning_reason = "clarification_needed"
             warning_user_reason = "目前回答和題目還不夠對焦，請先補充題目需要的具體資訊。"
 
-            if not _looks_like_clarification(user_text):
+            if current_question_topic == "custom":
+                should_warn = False
+            elif not _looks_like_clarification(user_text):
                 warning_prompt = f"""
 你是訪談風險分類器。請嚴格判斷是否需要發出 warning。
 
@@ -291,6 +398,7 @@ def create_graph(bot):
 
 規則：
 1) 只有在證據充分時才 should_warn=true。
+2) 必須是與當前問題幾乎完全無關，且合理懷疑惡意或拖延。
 2) participant_reason 必須具體指出問題，不可空泛。
 3) 只能輸出 JSON。
 """
@@ -300,12 +408,28 @@ def create_graph(bot):
                 warning_reason = str(warning_json.get("reason") or "off_topic_or_insufficient")
                 warning_user_reason = str(warning_json.get("participant_reason") or warning_user_reason).strip()
 
+                severe_reasons = {"MALICIOUS", "SEVERE_MISMATCH", "DELAYING", "NON_COOPERATIVE"}
+                if warning_reason not in severe_reasons:
+                    should_warn = False
+
             if should_warn:
                 warn_issued = True
-                updated = await db.increment_participant_warning(ObjectId(event_id), user_id, warning_reason)
+                updated = await db.increment_participant_warning(
+                    ObjectId(event_id),
+                    user_id,
+                    warning_reason,
+                    context={
+                        "question": current_question_text,
+                        "reply": user_text,
+                        "participant_reason": warning_user_reason,
+                    },
+                )
                 warning_count = (updated or {}).get("warning_count", 0)
                 if (updated or {}).get("review_status") == "ON_HOLD":
                     route = "hold"
+
+        if not interview_completed and next_qid == "completed":
+            next_qid = "confirm_submit"
 
         if interview_completed and route == "reprompt":
             warning_reason = "revision_format_invalid"
@@ -322,11 +446,14 @@ def create_graph(bot):
             "malicious_reason": warning_reason,
             "warn_issued": warn_issued,
             "warning_user_reason": warning_user_reason,
+            "warning_threshold": warning_threshold,
+            "remaining_minutes": remaining_minutes,
             "reprompt_reason": reprompt_reason,
             "interview_completed": interview_completed,
             "revision_count": revision_count,
             "revision_target_qid": revision_target_qid,
             "revision_attempt": bool(revision_target_qid),
+            "confirm_submit": confirm_submit,
         }
 
     async def reprompt_node(state: InterviewState):
@@ -336,6 +463,8 @@ def create_graph(bot):
         questions = state.get("questions", []) or []
         extracted = state.get("extracted", {}) or {}
         warning_count = int(state.get("warning_count", 0) or 0)
+        warning_threshold = int(state.get("warning_threshold", 5) or 5)
+        remaining_minutes = int(state.get("remaining_minutes", -1) or -1)
         warn_issued = bool(state.get("warn_issued"))
         warning_user_reason = str(state.get("warning_user_reason") or "").strip()
         reprompt_reason = str(state.get("reprompt_reason") or "").strip()
@@ -348,6 +477,11 @@ def create_graph(bot):
             message = (
                 "你目前已完成訪談。若要修訂答案，請用以下格式：\n"
                 "`題號: 新答案` 或 `when=新答案`（what/where/when/how 也可）"
+            )
+        elif str(current_question_id) == "confirm_submit":
+            message = (
+                "你已完成所有題目。\n"
+                "請使用按鈕 Confirm 送出最終結果，或按 Edit 選擇要修正的題目。"
             )
         else:
             question_text = current_question.get("text") or "可否補充更完整的回答？"
@@ -381,9 +515,12 @@ def create_graph(bot):
             if warn_issued:
                 reason_line = warning_user_reason or "目前回答與題目嚴重不一致，且有延宕訪談風險。"
                 message = (
-                    f"⚠️ 訪談提醒（{warning_count}/2）：{reason_line}\n"
+                    f"⚠️ 訪談提醒（{warning_count}/{warning_threshold}）：{reason_line}\n"
                     f"{message}"
                 )
+
+        if remaining_minutes >= 0:
+            message += f"\n\n⏳ 面試剩餘時間：約 {remaining_minutes} 分鐘"
 
         if batch_send_messages_tool and event_id and user_id:
             await batch_send_messages_tool.ainvoke(
@@ -407,15 +544,16 @@ def create_graph(bot):
         event = await db.get_event(ObjectId(event_id))
         initiator_id = (event or {}).get("initiator_id")
         warning_user_reason = str(state.get("warning_user_reason") or "目前回覆和題目嚴重不符，且有延遲訪談風險。")
-        warning_count = int(state.get("warning_count", 0) or 2)
+        warning_count = int(state.get("warning_count", 0) or 0)
+        warning_threshold = int(state.get("warning_threshold", 5) or 5)
 
         participant_msg = (
-            f"⚠️ 你的回覆已達提醒門檻（{warning_count}/2），目前訪談已暫停。\n"
+            f"⚠️ 你的回覆已達提醒門檻（{warning_count}/{warning_threshold}），目前訪談已暫停。\n"
             f"原因：{warning_user_reason}\n"
             "請等待主揪裁決是否繼續。"
         )
         host_msg = (
-            f"⚠️ 參與者 <@{user_id}> 已達提醒門檻（{warning_count}/2）。\n"
+            f"⚠️ 參與者 <@{user_id}> 已達提醒門檻（{warning_count}/{warning_threshold}）。\n"
             f"判定原因：{warning_user_reason}\n"
             "請使用活動卡片的管理選單 -> 處理暫停名單，直接在 UI 裁決。"
         )
@@ -453,6 +591,8 @@ def create_graph(bot):
         revision_count = int(state.get("revision_count", 0) or 0)
         revision_attempt = bool(state.get("revision_attempt"))
         revision_target_qid = str(state.get("revision_target_qid") or "")
+        confirm_submit = bool(state.get("confirm_submit"))
+        remaining_minutes = int(state.get("remaining_minutes", -1) or -1)
 
         completed = current_question_id == "completed"
 
@@ -474,8 +614,8 @@ def create_graph(bot):
                 answers=answers,
                 dealbreakers=dealbreakers,
                 current_question_id=current_question_id,
-                interview_completed=completed,
-                confirmed=completed,
+                interview_completed=completed and confirm_submit,
+                confirmed=completed and confirm_submit,
                 revision_count=revision_count,
                 is_malicious=False,
             )
@@ -492,35 +632,48 @@ def create_graph(bot):
                     note_type="public",
                 )
 
-            if completed:
+            if completed and confirm_submit:
                 await db.update_participant_status(ObjectId(event_id), user_id, "READY")
 
-        form_embed = _render_form_embed(questions, answers)
+        form_embed = _render_form_embed(questions, answers, current_question_id=str(current_question_id or ""))
         assistant_reply = str(extracted.get("assistant_reply") or "已更新你的回答。")
 
         if blocked_revision:
             if db and ObjectId.is_valid(event_id):
                 persisted = await db.get_participant(ObjectId(event_id), user_id)
                 persisted_answers = ((persisted or {}).get("interview", {}) or {}).get("answers", {}) or {}
-                form_embed = _render_form_embed(questions, persisted_answers)
+                form_embed = _render_form_embed(questions, persisted_answers, current_question_id=str(current_question_id or ""))
             assistant_reply = (
                 f"你已達最終修訂上限（{max_revisions} 次），我會保留目前已確認版本。\n"
                 "若仍需調整，請直接聯絡主揪處理。"
             )
-        elif completed:
+        elif completed and confirm_submit:
             assistant_reply += "\n\n✅ 你的訪談已完成，主揪將收到整合報告後裁決。"
             if interview_completed_before and revision_attempt:
                 assistant_reply += f"\n🔁 已更新修訂（{revision_count}/{max_revisions}）。"
+        elif str(current_question_id) == "confirm_submit":
+            assistant_reply = (
+                "你已完成所有題目。\n"
+                "請使用按鈕 Confirm 送出最終結果，或按 Edit 選擇要修正的題目。"
+            )
         else:
             qmap = _question_lookup(questions)
             next_q = qmap.get(str(current_question_id), {})
             next_q_text = next_q.get("text", "請回答下一題。")
             assistant_reply += f"\n\n下一題：{next_q_text}"
 
+        if remaining_minutes >= 0:
+            assistant_reply += f"\n\n⏳ 面試剩餘時間：約 {remaining_minutes} 分鐘"
+
         if batch_send_messages_tool and event_id and user_id:
             await batch_send_messages_tool.ainvoke(
                 {
-                    "messages": [{"user_id": user_id, "content": assistant_reply, "embed": form_embed}],
+                    "messages": [{
+                        "user_id": user_id,
+                        "content": assistant_reply,
+                        "embed": form_embed,
+                        "confirm_ui": str(current_question_id) == "confirm_submit",
+                    }],
                     "event_id": event_id,
                     "force": True,
                 }

@@ -20,9 +20,12 @@ class InterviewState(TypedDict, total=False):
     outbound_messages: List[Dict[str, Any]]
     malicious_reason: str
     warning_count: int
+    warning_threshold: int
+    remaining_minutes: int
     warn_issued: bool
     warning_user_reason: str
     reprompt_reason: str
+    confirm_submit: bool
     interview_completed: bool
     revision_count: int
     revision_target_qid: str

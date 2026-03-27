@@ -194,6 +194,7 @@ class Database(commands.Cog):
                 "answer_sources": {},
                 "confirmed": False,
                 "revision_count": 0,
+                "edited_question_ids": [],
                 "completed": False,
                 "last_question_status": "NONE",
             },
@@ -241,8 +242,8 @@ class Database(commands.Cog):
             "participants": [host_participant],
             "conversation_history": [],
             "warning_policy": {
-                "threshold": 2,
-                "max_final_revisions": 2,
+                "threshold": 5,
+                "max_final_revisions": 1,
             },
         }
         result = await self.events.insert_one(event_doc)
@@ -380,6 +381,7 @@ class Database(commands.Cog):
                     "answer_sources": {},
                     "confirmed": False,
                     "revision_count": 0,
+                    "edited_question_ids": [],
                     "completed": False,
                     "last_question_status": "NONE",
                 },
@@ -452,6 +454,7 @@ class Database(commands.Cog):
         interview_completed=None,
         confirmed=None,
         revision_count=None,
+        edited_question_ids=None,
         is_malicious=None,
     ):
         set_fields = {}
@@ -468,6 +471,8 @@ class Database(commands.Cog):
             set_fields["participants.$.interview.confirmed"] = confirmed
         if revision_count is not None:
             set_fields["participants.$.interview.revision_count"] = revision_count
+        if edited_question_ids is not None:
+            set_fields["participants.$.interview.edited_question_ids"] = edited_question_ids
         if is_malicious is not None:
             set_fields["participants.$.is_malicious"] = is_malicious
 
@@ -508,7 +513,10 @@ class Database(commands.Cog):
         )
         return True
 
-    async def increment_participant_warning(self, event_id, user_id, reason):
+    async def increment_participant_warning(self, event_id, user_id, reason, context=None):
+        event = await self.get_event(event_id)
+        threshold = int(((event or {}).get("warning_policy", {}) or {}).get("threshold", 5))
+
         update = {
             "$inc": {"participants.$.warning_count": 1},
             "$push": {"participants.$.warning_reasons": reason},
@@ -522,17 +530,27 @@ class Database(commands.Cog):
         if not participant:
             return None
 
-        if participant.get("warning_count", 0) >= 2:
+        if participant.get("warning_count", 0) >= threshold:
+            hold_context = {
+                "reason": reason,
+                "summary": f"Warning threshold reached: {reason}",
+            }
+            if isinstance(context, dict):
+                hold_context.update(
+                    {
+                        "question": str(context.get("question") or "").strip(),
+                        "reply": str(context.get("reply") or "").strip(),
+                        "participant_reason": str(context.get("participant_reason") or "").strip(),
+                    }
+                )
+
             await self.events.update_one(
                 {"_id": event_id, "participants.user_id": user_id},
                 {
                     "$set": {
                         "participants.$.review_status": "ON_HOLD",
                         "participants.$.status": "ON_HOLD",
-                        "participants.$.hold_context": {
-                            "reason": reason,
-                            "summary": f"Warning threshold reached: {reason}",
-                        },
+                        "participants.$.hold_context": hold_context,
                     }
                 },
             )
