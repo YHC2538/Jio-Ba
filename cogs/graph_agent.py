@@ -208,7 +208,7 @@ def create_graph(bot):
 
         question_map = _question_lookup(questions)
         current_question_id = normalize_question_id(current_question_id, questions)
-        warning_threshold = int((((event or {}).get("warning_policy", {}) or {}).get("threshold", 5)) if event else 5)
+        warning_threshold = int((((event or {}).get("warning_policy", {}) or {}).get("threshold", 6)) if event else 6)
         remaining_minutes = _remaining_minutes(event or {}) if event else -1
 
         if current_question_id == "completed":

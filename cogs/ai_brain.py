@@ -198,6 +198,15 @@ class AIBrain(commands.Cog):
                 }
                 final_state = await self.graph.ainvoke(initial_state, config=trace_config)
                 print("[DEBUG LOG] Graph ainvoke returned.")
+
+                # Re-check adjudication after state updates from graph execution.
+                jio_cog = self.bot.get_cog("Jio")
+                if jio_cog:
+                    try:
+                        from bson import ObjectId
+                        await jio_cog.maybe_trigger_adjudication(ObjectId(event_id) if ObjectId.is_valid(event_id) else event_id)
+                    except Exception as adjudication_err:
+                        print(f"[DEBUG LOG] maybe_trigger_adjudication failed after graph run: {adjudication_err}")
                 
                 messages = final_state.get("messages", [])
                 if messages:

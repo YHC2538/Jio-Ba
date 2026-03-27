@@ -371,7 +371,7 @@ class Database(commands.Cog):
             "participants": {
                 "$elemMatch": {
                     "user_id": user_id,
-                    "status": {"$in": ["INTERVIEWING", "ON_HOLD"]},
+                    "status": "INTERVIEWING",
                 }
             },
         }

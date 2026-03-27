@@ -151,6 +151,19 @@ def format_activity_seeds(seeds: dict) -> str:
             items.append(f"{labels[key]}: {value}")
     return "\n".join(items)
 
+
+def build_optional_input_text(**kwargs):
+    """
+    Workaround for py-cord 2.7.x where required=False may serialize as required=None.
+    Force component payload required=False at underlying layer.
+    """
+    comp = discord.ui.InputText(required=False, **kwargs)
+    try:
+        comp._underlying.required = False
+    except Exception:
+        pass
+    return comp
+
 class JioCreationModal(discord.ui.Modal):
     def __init__(
         self,
@@ -176,37 +189,33 @@ class JioCreationModal(discord.ui.Modal):
             value=default_title
         ))
         
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="活動資訊 / 4W1H seeds",
             placeholder="請自由描述活動，建議可提到 what/where/when/why/how 關鍵資訊",
             style=discord.InputTextStyle.long,
-            required=False,
             min_length=0,
         ))
         
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="報名截止時間（分鐘，選填）",
             placeholder="例如：30",
             style=discord.InputTextStyle.short,
-            required=False,
             min_length=0,
             value=str(default_signup_time) if default_signup_time else None,
         ))
 
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="面試截止時間（分鐘，選填）",
             placeholder="例如：90",
             style=discord.InputTextStyle.short,
-            required=False,
             min_length=0,
             value=str(default_interview_time) if default_interview_time else None,
         ))
 
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="最低成團人數（選填）",
             placeholder="例如：4",
             style=discord.InputTextStyle.short,
-            required=False,
             min_length=0,
             value=str(default_min_participants) if default_min_participants else None,
         ))
@@ -378,37 +387,34 @@ class JioEditModal(discord.ui.Modal):
             required=True
         ))
         
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="活動說明",
             value=current_desc,
             style=discord.InputTextStyle.long,
-            required=False
+            min_length=0,
         ))
         
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="報名截止時間(分鐘，選填)",
             value=str(current_time) if current_time else "",
             placeholder="留空則不變更",
             style=discord.InputTextStyle.short,
-            required=False,
             min_length=0,
         ))
 
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="面試截止時間(分鐘，選填)",
             value="",
             placeholder="留空則不變更",
             style=discord.InputTextStyle.short,
-            required=False,
             min_length=0,
         ))
 
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="自訂問題（選填，最多1題）",
             value=str(current_custom or ""),
             placeholder="留空代表移除自訂問題",
             style=discord.InputTextStyle.long,
-            required=False,
             min_length=0,
         ))
         
@@ -673,6 +679,8 @@ class AdjudicationView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         await jio_cog.apply_adjudication_choice(self.event_id, interaction.user.id, 1, interaction)
 
     @discord.ui.button(label="採用方案 2", style=discord.ButtonStyle.blurple)
@@ -681,6 +689,8 @@ class AdjudicationView(View):
         if not jio_cog:
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
+
+        await interaction.response.defer(ephemeral=True)
 
         await jio_cog.apply_adjudication_choice(self.event_id, interaction.user.id, 2, interaction)
 
@@ -691,11 +701,11 @@ class CancelEventModal(discord.ui.Modal):
         self.bot = bot
         self.event_id = event_id
 
-        self.add_item(discord.ui.InputText(
+        self.add_item(build_optional_input_text(
             label="取消原因（選填）",
             placeholder="例如：人數不足、時程變更",
             style=discord.InputTextStyle.long,
-            required=False,
+            min_length=0,
         ))
 
     async def callback(self, interaction: discord.Interaction):
@@ -1621,6 +1631,18 @@ class Jio(commands.Cog):
         if not all_completed and not deadline_reached:
             return
 
+        if all_completed and not event.get("interview_ended_early_announced"):
+            await db.events.update_one(
+                {"_id": event_id},
+                {"$set": {"interview_ended_early_announced": True}},
+            )
+            channel = await self._resolve_channel(event.get("channel_id"))
+            if channel:
+                try:
+                    await channel.send("⚡ 所有參與者都已送出訪談，已提早結束面試並進入裁決流程。")
+                except Exception:
+                    pass
+
         await self.send_adjudication_report(event_id)
 
     async def send_adjudication_report(self, event_id):
@@ -1668,6 +1690,11 @@ class Jio(commands.Cog):
 
             uid = participant.get("user_id")
             user_obj = self.bot.get_user(uid)
+            if not user_obj:
+                try:
+                    user_obj = await self.bot.fetch_user(uid)
+                except Exception:
+                    user_obj = None
             name = user_obj.display_name if user_obj else f"User {uid}"
             status = participant.get("status", "UNKNOWN")
             answers = (participant.get("interview", {}) or {}).get("answers", {}) or {}
@@ -1708,25 +1735,61 @@ class Jio(commands.Cog):
 
     async def apply_adjudication_choice(self, event_id, user_id, choice_index, interaction=None):
         db = self.bot.get_cog("Database")
+
+        async def _reply(text):
+            if not interaction:
+                return
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(text, ephemeral=True)
+                else:
+                    await interaction.response.send_message(text, ephemeral=True)
+            except Exception:
+                pass
+
         event = await db.get_event(event_id)
         if not event:
-            if interaction:
-                await interaction.response.send_message("活動不存在。", ephemeral=True)
+            await _reply("活動不存在。")
             return
 
         if event.get("initiator_id") != user_id:
-            if interaction:
-                await interaction.response.send_message("只有發起人可裁決。", ephemeral=True)
+            await _reply("只有發起人可裁決。")
+            return
+
+        current_status = event.get("adjudication_status")
+        if current_status in {"DECIDED", "DECIDING", "CANCELLED"}:
+            await _reply("此活動已完成裁決，請勿重複操作。")
+            return
+        if current_status not in {None, "PENDING", "AWAITING_HOST_CHOICE"}:
+            await _reply("目前尚未進入可裁決狀態。")
             return
 
         candidates = event.get("adjudication_candidates", []) or []
         idx = choice_index - 1
         if idx < 0 or idx >= len(candidates):
-            if interaction:
-                await interaction.response.send_message("方案不存在。", ephemeral=True)
+            await _reply("方案不存在。")
             return
 
         selected = candidates[idx]
+
+        # Claim adjudication once to avoid duplicate announcements on repeated clicks.
+        claim_result = await db.events.update_one(
+            {
+                "_id": event_id,
+                "adjudication_status": {"$in": [None, "PENDING", "AWAITING_HOST_CHOICE"]},
+            },
+            {
+                "$set": {
+                    "adjudication_status": "DECIDING",
+                    "adjudication_by": user_id,
+                    "adjudication_at": datetime.datetime.utcnow(),
+                }
+            },
+        )
+        if getattr(claim_result, "modified_count", 0) == 0:
+            await _reply("此活動已完成裁決，請勿重複操作。")
+            return
+
         scheduled_event_id = await self.create_scheduled_event_from_plan(event, selected)
 
         await db.events.update_one(
@@ -1761,8 +1824,7 @@ class Jio(commands.Cog):
                     announce_text += "\n請以下通過面試的成員前往活動事件按 Interested：\n" + " ".join(ready_mentions)
             await channel.send(announce_text)
 
-        if interaction:
-            await interaction.response.send_message("✅ 已完成裁決並公告。", ephemeral=True)
+        await _reply("✅ 已完成裁決並公告。")
 
     async def create_scheduled_event_from_plan(self, event, selected):
         guild = None
@@ -2231,7 +2293,6 @@ class Jio(commands.Cog):
                 print(f"[DEBUG LOG] Queueing message for AIBrain... (Event {event_id})")
                 try:
                     await brain.queue_message(str(event_id), message.author.id, message.content, message.author.display_name)
-                    await self.maybe_trigger_adjudication(event_id)
                     # We don't wait for result here. It runs in background.
                 except Exception as e:
                     print(f"[DEBUG LOG] AIBrain queue FAILED: {e}")
