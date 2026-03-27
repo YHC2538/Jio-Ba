@@ -28,91 +28,75 @@ class AIBrain(commands.Cog):
         # Note: We need to ensure the graph is created with the bot instance for tools
         self.graph = create_graph(bot)
         
-        # Batch Processing State
-        self.message_queues = {} # event_id -> list of {"user_id": uid, "content": msg, "name": name}
-        self.processing_tasks = {} # event_id -> asyncio.Task
-        self.locks = {} # event_id -> asyncio.Lock
+        # Per-user processing state.
+        # queue_key format: "{event_id}:{user_id}"
+        self.message_queues = {} # queue_key -> list of {"content": msg, "name": name}
+        self.processing_tasks = {} # queue_key -> asyncio.Task
+        self.locks = {} # lock_key -> asyncio.Lock (event_id:user_id or event_id)
         
         print("LangGraph Agent initialized with Batch Processing.")
 
     async def queue_message(self, event_id: str, user_id: int, content: str, user_name: str):
         """
-        Add a message to the event's queue and ensure a processing task is running.
+        Add a message to the participant queue and ensure a processing task is running.
         """
-        if event_id not in self.message_queues:
-            self.message_queues[event_id] = []
-            
-        self.message_queues[event_id].append({
-            "user_id": user_id, 
+        queue_key = f"{event_id}:{user_id}"
+
+        if queue_key not in self.message_queues:
+            self.message_queues[queue_key] = []
+
+        self.message_queues[queue_key].append({
             "content": content,
             "name": user_name
         })
-        print(f"[AIBrain] Queued message from {user_name} for Event {event_id}. Queue size: {len(self.message_queues[event_id])}")
-        
-        # Start processing task if not running
-        if event_id not in self.processing_tasks or self.processing_tasks[event_id].done():
-            self.processing_tasks[event_id] = asyncio.create_task(self._process_loop(event_id))
+        print(
+            f"[AIBrain] Queued message from {user_name} for Event {event_id} User {user_id}. "
+            f"Queue size: {len(self.message_queues[queue_key])}"
+        )
 
-    async def _process_loop(self, event_id: str):
+        # Start processing task if not running for this participant.
+        if queue_key not in self.processing_tasks or self.processing_tasks[queue_key].done():
+            self.processing_tasks[queue_key] = asyncio.create_task(self._process_loop(queue_key, event_id, user_id))
+
+    async def _process_loop(self, queue_key: str, event_id: str, user_id: int):
         """
-        Consumes messages from the queue with debounce logic.
+        Consumes one participant queue with debounce logic.
         """
-        print(f"[AIBrain] Started process loop for Event {event_id}")
+        print(f"[AIBrain] Started process loop for {queue_key}")
         
         try:
             while True:
-                # 1. Debounce: Wait for 2 seconds to let more messages come in
-                # But if queue is empty (processed everything), break
-                if event_id not in self.message_queues or not self.message_queues[event_id]:
-                    # Double check after a small yield to be sure?
-                    # No, we check at start of loop. If empty, we are done.
+                if queue_key not in self.message_queues or not self.message_queues[queue_key]:
                     break
-                
-                print(f"[AIBrain] Waiting 2.0s for debounce (Event {event_id})...")
-                await asyncio.sleep(2.0)
-                
-                # Check queue again
-                queue = self.message_queues.get(event_id, [])
+
+                # Per-user debounce avoids bot over-reply while still allowing cross-user parallelism.
+                print(f"[AIBrain] Waiting 1.2s for debounce ({queue_key})...")
+                await asyncio.sleep(1.2)
+
+                queue = self.message_queues.get(queue_key, [])
                 if not queue:
                     break
-                
-                # 2. Drain Queue
-                # We take a snapshot of current messages to process
+
                 batch_messages = list(queue)
-                # Clear the queue immediately so new messages start a fresh batch (or get appended if we loop)
-                # Actually, better to clear only what we took.
-                self.message_queues[event_id] = [] 
-                
-                print(f"[AIBrain] Processing batch of {len(batch_messages)} messages for Event {event_id}")
-                
-                # 3. Consolidate User Inputs
-                # user_inputs format: {user_id: "content"}
-                # If multiple messages from same user, append them?
-                user_inputs = {}
-                for msg in batch_messages:
-                    uid = msg["user_id"]
-                    text = msg["content"]
-                    if uid in user_inputs:
-                        user_inputs[uid] += f"\n{text}"
-                    else:
-                        user_inputs[uid] = text
-                
-                # 4. Invoke Agent (with Lock)
-                # invoke_agent already has locking logic, so we can just call it.
-                # It handles DB fetches and state construction.
-                await self.invoke_agent(event_id, user_inputs)
-                
-                # Loop will continue and check if new messages arrived during invoke_agent
-                
+                self.message_queues[queue_key] = []
+
+                merged_text = "\n".join([str(item.get("content") or "").strip() for item in batch_messages if str(item.get("content") or "").strip()]).strip()
+                if not merged_text:
+                    continue
+
+                print(f"[AIBrain] Processing {len(batch_messages)} messages for {queue_key}")
+                await self.invoke_agent(event_id, {user_id: merged_text})
+
         except Exception as e:
-            print(f"[AIBrain] Error in process_loop for {event_id}: {e}")
+            print(f"[AIBrain] Error in process_loop for {queue_key}: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            # Cleanup task reference
-            if event_id in self.processing_tasks:
-                del self.processing_tasks[event_id]
-            print(f"[AIBrain] Process loop finished for {event_id}")
+            if queue_key in self.processing_tasks:
+                del self.processing_tasks[queue_key]
+            if queue_key in self.message_queues and not self.message_queues[queue_key]:
+                del self.message_queues[queue_key]
+            print(f"[AIBrain] Process loop finished for {queue_key}")
 
     async def invoke_agent(self, event_id: str, user_inputs: dict):
         """
@@ -127,12 +111,17 @@ class AIBrain(commands.Cog):
             The final state (or None if execution finished).
         """
         if not hasattr(self, 'locks'):
-             self.locks = {}
-        
-        if event_id not in self.locks:
-             self.locks[event_id] = asyncio.Lock()
-             
-        lock = self.locks[event_id]
+            self.locks = {}
+
+        lock_key = str(event_id)
+        if isinstance(user_inputs, dict) and len(user_inputs) == 1:
+            only_uid = next(iter(user_inputs.keys()))
+            lock_key = f"{event_id}:{only_uid}"
+
+        if lock_key not in self.locks:
+            self.locks[lock_key] = asyncio.Lock()
+
+        lock = self.locks[lock_key]
         
         async with lock:
             print(f"[DEBUG LOG] AIBrain.invoke_agent called for event {event_id} (Lock Acquired)")

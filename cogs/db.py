@@ -191,6 +191,7 @@ class Database(commands.Cog):
             "interview": {
                 "current_question_id": interview_questions[0]["id"] if interview_questions else None,
                 "answers": {},
+                "draft_answers": {},
                 "answer_sources": {},
                 "confirmed": False,
                 "revision_count": 0,
@@ -363,6 +364,21 @@ class Database(commands.Cog):
     async def get_event(self, event_id):
         return await self.events.find_one({"_id": event_id})
 
+    async def find_conflicting_interview_event(self, user_id, exclude_event_id=None):
+        query = {
+            "cancelled": {"$ne": True},
+            "workflow_state": {"$nin": ["CANCELLED", "FAILED_MIN_PARTICIPANTS"]},
+            "participants": {
+                "$elemMatch": {
+                    "user_id": user_id,
+                    "status": {"$in": ["INTERVIEWING", "ON_HOLD"]},
+                }
+            },
+        }
+        if exclude_event_id is not None:
+            query["_id"] = {"$ne": exclude_event_id}
+        return await self.events.find_one(query, sort=[("_id", -1)])
+
     # Participant Methods
     async def add_participant(self, event_id, user_id):
         event = await self.events.find_one({"_id": event_id})
@@ -378,6 +394,7 @@ class Database(commands.Cog):
                 "interview": {
                     "current_question_id": questions[0]["id"] if questions else None,
                     "answers": {},
+                    "draft_answers": {},
                     "answer_sources": {},
                     "confirmed": False,
                     "revision_count": 0,
@@ -449,6 +466,7 @@ class Database(commands.Cog):
         event_id,
         user_id,
         answers=None,
+        draft_answers=None,
         dealbreakers=None,
         current_question_id=None,
         interview_completed=None,
@@ -461,6 +479,8 @@ class Database(commands.Cog):
 
         if answers is not None:
             set_fields["participants.$.interview.answers"] = answers
+        if draft_answers is not None:
+            set_fields["participants.$.interview.draft_answers"] = draft_answers
         if dealbreakers is not None:
             set_fields["participants.$.dealbreakers"] = dealbreakers
         if current_question_id is not None:
@@ -517,6 +537,14 @@ class Database(commands.Cog):
         event = await self.get_event(event_id)
         threshold = int(((event or {}).get("warning_policy", {}) or {}).get("threshold", 5))
 
+        participant = await self.get_participant(event_id, user_id)
+        if not participant:
+            return None
+
+        # Keep warning counter event-scoped and capped to threshold.
+        if int(participant.get("warning_count", 0) or 0) >= threshold:
+            return participant
+
         update = {
             "$inc": {"participants.$.warning_count": 1},
             "$push": {"participants.$.warning_reasons": reason},
@@ -569,6 +597,7 @@ class Database(commands.Cog):
                     "$set": {
                         "participants.$.review_status": "CONTINUE",
                         "participants.$.status": "INTERVIEWING",
+                        "participants.$.interview.last_question_status": "WAITING_FOR_REPLY",
                         "participants.$.hold_context": {
                             "verdict": "CONTINUE",
                             "reason": reason,

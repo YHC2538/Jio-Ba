@@ -6,6 +6,7 @@ class InterviewState(TypedDict, total=False):
     user_id: str
     current_question_id: str
     answers: Dict[str, Any]
+    draft_answers: Dict[str, str]
     questions: List[Dict[str, Any]]
     dealbreakers: List[str]
     chat_history: List[Dict[str, Any]]

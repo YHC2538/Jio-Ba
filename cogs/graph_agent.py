@@ -184,6 +184,7 @@ def create_graph(bot):
 
         questions: List[Dict[str, Any]] = []
         answers: Dict[str, Any] = {}
+        draft_answers: Dict[str, str] = {}
         current_question_id = None
         dealbreakers: List[str] = []
         interview_completed = False
@@ -199,6 +200,7 @@ def create_graph(bot):
             if participant:
                 interview = participant.get("interview", {}) or {}
                 answers = interview.get("answers", {}) or {}
+                draft_answers = interview.get("draft_answers", {}) or {}
                 current_question_id = interview.get("current_question_id")
                 interview_completed = bool(interview.get("completed"))
                 revision_count = int(interview.get("revision_count", 0) or 0)
@@ -224,6 +226,7 @@ def create_graph(bot):
                     "user_id": str(user_id),
                     "current_question_id": "completed",
                     "answers": answers,
+                    "draft_answers": draft_answers,
                     "questions": questions,
                     "dealbreakers": dealbreakers,
                     "extracted": {
@@ -251,6 +254,7 @@ def create_graph(bot):
                     "user_id": str(user_id),
                     "current_question_id": "confirm_submit",
                     "answers": answers,
+                    "draft_answers": draft_answers,
                     "questions": questions,
                     "dealbreakers": dealbreakers,
                     "extracted": {
@@ -276,6 +280,7 @@ def create_graph(bot):
                 "user_id": str(user_id),
                 "current_question_id": "confirm_submit",
                 "answers": answers,
+                "draft_answers": draft_answers,
                 "questions": questions,
                 "dealbreakers": dealbreakers,
                 "extracted": {"assistant_reply": "", "private_note": ""},
@@ -297,6 +302,12 @@ def create_graph(bot):
         current_question = question_map.get(str(current_question_id or ""), {})
         current_question_text = current_question.get("text", "目前沒有待回答問題")
         current_question_topic = str(current_question.get("topic") or "")
+        current_draft = str(draft_answers.get(str(current_question_id or "")) or "").strip()
+        combined_user_text = str(user_text or "").strip()
+        if current_draft and combined_user_text and combined_user_text not in current_draft:
+            combined_user_text = f"{current_draft}；{combined_user_text}"
+        elif current_draft and not combined_user_text:
+            combined_user_text = current_draft
 
         extraction_prompt = f"""
 你是活動訪談資料整理器，請根據目前問題判斷使用者回答是否充分，並輸出 JSON。
@@ -306,7 +317,9 @@ def create_graph(bot):
 活動預設 seeds: {json.dumps(((event or {}).get("activity_seeds", {}) or {}), ensure_ascii=False)}
 目前問題ID: {current_question_id}
 目前問題內容: {current_question_text}
+前次暫存回答（可能為空）: {current_draft}
 使用者輸入: {user_text}
+可用整合上下文（前次暫存 + 本次輸入）: {combined_user_text}
 
 輸出格式（只能 JSON）：
 {{
@@ -322,6 +335,7 @@ def create_graph(bot):
 規則：
 1) sufficient=true 代表可以用來回答目前問題，不可過度寬鬆。
 2) 若是過於含糊（例如：隨便、都可以、今天）通常 sufficient=false。
+3) 若本次輸入可補足前次暫存內容，應整合後判定為 sufficient=true，並在 answer_value 輸出整合結果。
 3) dealbreakers 可為任何活動限制，不限飲食。
 4) assistant_reply 使用繁體中文，禮貌且簡潔。
 5) missing_reason 說明目前回答缺什麼，讓使用者知道如何補充。
@@ -331,7 +345,7 @@ def create_graph(bot):
         response = await llm.ainvoke(extraction_prompt)
         parsed = _safe_json_parse(getattr(response, "content", ""))
 
-        extracted_answer = str(parsed.get("answer_value") or user_text or "").strip()
+        extracted_answer = str(parsed.get("answer_value") or combined_user_text or user_text or "").strip()
         sufficient = bool(parsed.get("sufficient")) and is_sufficient_answer(extracted_answer)
         off_topic = bool(parsed.get("off_topic"))
         reprompt_reason = str(parsed.get("missing_reason") or "").strip()
@@ -354,6 +368,9 @@ def create_graph(bot):
 
         if sufficient and current_question_id and current_question_id != "completed":
             answers[str(current_question_id)] = extracted_answer
+            draft_answers.pop(str(current_question_id), None)
+        elif current_question_id and current_question_id not in {"completed", "confirm_submit"}:
+            draft_answers[str(current_question_id)] = combined_user_text[:500]
 
         merged_dealbreakers = list(dict.fromkeys(dealbreakers + (parsed.get("dealbreakers", []) or [])))
         next_qid = next_question_id(current_question_id, questions, answers)
@@ -438,6 +455,7 @@ def create_graph(bot):
             "user_id": str(user_id),
             "current_question_id": next_qid,
             "answers": answers,
+            "draft_answers": draft_answers,
             "questions": questions,
             "dealbreakers": merged_dealbreakers,
             "extracted": parsed,
@@ -469,6 +487,7 @@ def create_graph(bot):
         warning_user_reason = str(state.get("warning_user_reason") or "").strip()
         reprompt_reason = str(state.get("reprompt_reason") or "").strip()
         interview_completed = bool(state.get("interview_completed"))
+        draft_answers = state.get("draft_answers", {}) or {}
         _, latest_user_text = _latest_user_input(state.get("user_inputs", {}))
         qmap = _question_lookup(questions)
         current_question = qmap.get(str(current_question_id), {})
@@ -518,6 +537,12 @@ def create_graph(bot):
                     f"⚠️ 訪談提醒（{warning_count}/{warning_threshold}）：{reason_line}\n"
                     f"{message}"
                 )
+
+            partial = str(draft_answers.get(str(current_question_id)) or "").strip()
+            if partial:
+                if len(partial) > 180:
+                    partial = partial[:170] + "..."
+                message += f"\n\n📝 我目前已記錄到的資訊：{partial}"
 
         if remaining_minutes >= 0:
             message += f"\n\n⏳ 面試剩餘時間：約 {remaining_minutes} 分鐘"
@@ -583,6 +608,7 @@ def create_graph(bot):
         user_id = int(state.get("user_id", "0") or 0)
 
         answers = state.get("answers", {}) or {}
+        draft_answers = state.get("draft_answers", {}) or {}
         questions = state.get("questions", []) or []
         dealbreakers = state.get("dealbreakers", []) or []
         current_question_id = state.get("current_question_id")
@@ -612,6 +638,7 @@ def create_graph(bot):
                 ObjectId(event_id),
                 user_id,
                 answers=answers,
+                draft_answers=draft_answers,
                 dealbreakers=dealbreakers,
                 current_question_id=current_question_id,
                 interview_completed=completed and confirm_submit,
@@ -660,7 +687,9 @@ def create_graph(bot):
             qmap = _question_lookup(questions)
             next_q = qmap.get(str(current_question_id), {})
             next_q_text = next_q.get("text", "請回答下一題。")
-            assistant_reply += f"\n\n下一題：{next_q_text}"
+            already_has_next_prompt = ("下一題" in assistant_reply) or (next_q_text in assistant_reply)
+            if not already_has_next_prompt:
+                assistant_reply += f"\n\n下一題：{next_q_text}"
 
         if remaining_minutes >= 0:
             assistant_reply += f"\n\n⏳ 面試剩餘時間：約 {remaining_minutes} 分鐘"
