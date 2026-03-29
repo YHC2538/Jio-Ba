@@ -419,7 +419,7 @@ class JioEditModal(discord.ui.Modal):
         ))
         
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         
         new_title = self.children[0].value
         new_desc = self.children[1].value
@@ -644,7 +644,7 @@ class JoinView(View):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         db = self.bot.get_cog("Database")
 
         await db.add_participant(self.event_id, interaction.user.id)
@@ -679,7 +679,7 @@ class AdjudicationView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
 
         await jio_cog.apply_adjudication_choice(self.event_id, interaction.user.id, 1, interaction)
 
@@ -690,7 +690,7 @@ class AdjudicationView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
 
         await jio_cog.apply_adjudication_choice(self.event_id, interaction.user.id, 2, interaction)
 
@@ -715,7 +715,7 @@ class CancelEventModal(discord.ui.Modal):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         ok = await jio_cog.cancel_event_with_announcement(
             self.event_id,
             interaction.user.id,
@@ -749,7 +749,7 @@ class HoldVerdictReasonModal(discord.ui.Modal):
             await interaction.response.send_message("資料庫模組不可用", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         reason = self.children[0].value
         ok = await db.apply_host_verdict(self.event_id, self.target_user_id, self.verdict, reason=reason)
         if not ok:
@@ -854,7 +854,7 @@ class HoldKickSelect(discord.ui.Select):
             options.append(discord.SelectOption(label=label[:100], value=str(uid), description=summary[:100]))
 
         super().__init__(
-            placeholder="選擇要 KICK 的 ON_HOLD 成員",
+            placeholder="選擇要處理的成員",
             min_values=1,
             max_values=1,
             options=options,
@@ -951,23 +951,32 @@ class EndEarlyChoiceView(View):
 
     @discord.ui.button(label="提早結束報名", style=discord.ButtonStyle.blurple)
     async def end_signup(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # Disable buttons immediately to prevent double clicks
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        
         jio_cog = self.bot.get_cog("Jio")
         if not jio_cog:
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         await jio_cog.start_interview_phase(self.event_id, manual_trigger_user=interaction.user)
         await interaction.followup.send("✅ 已提前截止報名並開始面試。", ephemeral=True)
 
     @discord.ui.button(label="提早結束面試", style=discord.ButtonStyle.red)
     async def end_interview(self, button: discord.ui.Button, interaction: discord.Interaction):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        
         jio_cog = self.bot.get_cog("Jio")
         if not jio_cog:
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         await jio_cog.end_interview_early(self.event_id, trigger_user=interaction.user)
         await interaction.followup.send("✅ 已提前結束面試流程。", ephemeral=True)
 
@@ -994,7 +1003,7 @@ class ConfirmEditQuestionSelect(discord.ui.Select):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         await jio_cog.enter_edit_question_mode(self.event_id, self.user_id, self.values[0], interaction)
 
 
@@ -1022,7 +1031,7 @@ class ConfirmSubmissionView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         self.clear_items()
         try:
             await interaction.message.edit(view=self)
@@ -1041,7 +1050,7 @@ class ConfirmSubmissionView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # removed defer because edit_message handles it
         await jio_cog.open_edit_question_selector(self.event_id, self.user_id, interaction)
 
 
@@ -1229,6 +1238,11 @@ class Jio(commands.Cog):
 
         await self.disable_management_view(event_id)
 
+        for participant in event.get("participants", []):
+            uid = participant.get("user_id")
+            if uid:
+                await db.clear_user_active_event_if_matches(uid, str(event_id))
+
         return True
 
     async def describe_current_interview_state(self, event, user_id):
@@ -1381,7 +1395,7 @@ class Jio(commands.Cog):
 
         view = HoldKickView(self.bot, event_id, candidates)
         await interaction.response.send_message(
-            "請選擇要移出的 ON_HOLD 參與者，並填寫原因。",
+            "請選擇要處理的 [停權狀態] 參與者，並填寫原因。",
             view=view,
             ephemeral=True,
         )
@@ -1439,23 +1453,6 @@ class Jio(commands.Cog):
             if not uid:
                 continue
 
-            conflict = await db.find_conflicting_interview_event(uid, exclude_event_id=event_id)
-            if conflict:
-                await db.update_participant_status(event_id, uid, "KICKED")
-                await db.events.update_one(
-                    {"_id": event_id, "participants.user_id": uid},
-                    {
-                        "$set": {
-                            "participants.$.review_status": "CONFLICT_ACTIVE_INTERVIEW",
-                            "participants.$.hold_context": {
-                                "verdict": "KICK",
-                                "reason": f"Active interview conflict with {conflict.get('title', '未命名活動')}",
-                            },
-                        }
-                    },
-                )
-                continue
-
             targets.append(uid)
 
             try:
@@ -1472,6 +1469,7 @@ class Jio(commands.Cog):
                     )
                     await db.update_participant_status(event_id, uid, "INTERVIEWING")
                     await db.set_participant_reply_status(event_id, uid, "WAITING_FOR_REPLY")
+                    await db.set_user_active_event(uid, str(event_id))
                     remaining = self._remaining_interview_minutes(event)
                     remain_tip = f"\n⏳ 面試剩餘時間：約 {remaining} 分鐘" if remaining is not None else ""
                     await user.send(f"➡️ 第 1 題：{first_question.get('text', '')}{remain_tip}")
@@ -1484,6 +1482,7 @@ class Jio(commands.Cog):
                         confirmed=True,
                     )
                     await db.update_participant_status(event_id, uid, "READY")
+                    await db.clear_user_active_event_if_matches(uid, str(event_id))
                 prompts.append(uid)
                 print(f"[DEBUG] Initial interview DM sent to {uid}")
             except discord.Forbidden:
@@ -1530,12 +1529,14 @@ class Jio(commands.Cog):
         cursor = db.events.find(
             {
                 "cancelled": {"$ne": True},
-                "workflow_state": {"$nin": ["CANCELLED", "FAILED_MIN_PARTICIPANTS"]},
+                "workflow_state": {"$nin": ["CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"]},
+                "adjudication_status": {"$nin": ["DECIDED", "CANCELLED"]},
                 "participants.user_id": user_id,
                 "participants": {
                     "$elemMatch": {
                         "user_id": user_id,
-                        "status": {"$in": ["INTERVIEWING", "ON_HOLD"]}
+                        "status": {"$in": ["INTERVIEWING", "ON_HOLD"]},
+                        "interview.completed": {"$ne": True},
                     }
                 }
             }
@@ -1796,6 +1797,8 @@ class Jio(commands.Cog):
             {"_id": event_id},
             {
                 "$set": {
+                    "workflow_state": "FINISHED",
+                    "active": False,
                     "adjudication_status": "DECIDED",
                     "adjudication_result": selected,
                     "adjudication_by": user_id,
@@ -1804,6 +1807,20 @@ class Jio(commands.Cog):
                 }
             }
         )
+        await db.events.update_one(
+            {"_id": event_id},
+            {
+                "$set": {
+                    "participants.$[elem].status": "FINISHED",
+                }
+            },
+            array_filters=[{"elem.status": {"$in": ["PENDING", "INTERVIEWING", "READY", "ON_HOLD", "JOINED"]}}],
+        )
+
+        for participant in event.get("participants", []):
+            uid = participant.get("user_id")
+            if uid:
+                await db.clear_user_active_event_if_matches(uid, str(event_id))
 
         await self.disable_management_view(event_id)
 
@@ -1893,7 +1910,7 @@ class Jio(commands.Cog):
         
         # 2. Notify Channel
         event_channel = await self._resolve_channel(event.get("channel_id"))
-        if event_channel:
+        if event_channel and (event.get("interview_questions") or []):
             msg = f"⏰ 報名截止！開始面試..."
             if manual_trigger_user:
                 msg = f"⚡ {manual_trigger_user.mention} 提前截止了報名！開始面試..."
@@ -1929,6 +1946,72 @@ class Jio(commands.Cog):
             st = p.get("status", "<none>")
             status_summary[st] = status_summary.get(st, 0) + 1
         print(f"[DEBUG] Interview phase participant status summary: {status_summary}")
+
+        # If there are no interview questions, finish directly and announce known info.
+        interview_questions = event.get("interview_questions", []) or []
+        if not interview_questions:
+            seeds = event.get("activity_seeds", {}) or {}
+            known_lines = []
+            if str(seeds.get("what") or "").strip():
+                known_lines.append(f"- What: {str(seeds.get('what')).strip()}")
+            if str(seeds.get("where") or "").strip():
+                known_lines.append(f"- Where: {str(seeds.get('where')).strip()}")
+            if str(seeds.get("when") or "").strip():
+                known_lines.append(f"- When: {str(seeds.get('when')).strip()}")
+            if str(seeds.get("how") or "").strip():
+                known_lines.append(f"- How: {str(seeds.get('how')).strip()}")
+            known_block = "\n".join(known_lines) if known_lines else f"- 描述: {event.get('description', '（無）')}"
+
+            await db.events.update_one(
+                {"_id": event_id},
+                {
+                    "$set": {
+                        "active": False,
+                        "workflow_state": "FINISHED",
+                        "adjudication_status": "DECIDED",
+                        "adjudication_result": {
+                            "candidate": {
+                                "what": str(seeds.get("what") or "活動內容待定"),
+                                "where": str(seeds.get("where") or "地點待定"),
+                                "when": str(seeds.get("when") or "時間待定"),
+                                "budget": str(seeds.get("how") or "流程待定"),
+                            }
+                        },
+                    }
+                },
+            )
+            await db.events.update_one(
+                {"_id": event_id},
+                {
+                    "$set": {
+                        "participants.$[elem].status": "FINISHED",
+                        "participants.$[elem].interview.current_question_id": "completed",
+                        "participants.$[elem].interview.completed": True,
+                        "participants.$[elem].interview.confirmed": True,
+                    }
+                },
+                array_filters=[{"elem.status": {"$nin": ["KICKED", "DECLINED", "FINISHED"]}}],
+            )
+
+            for participant in event.get("participants", []):
+                uid = participant.get("user_id")
+                if uid:
+                    await db.clear_user_active_event_if_matches(uid, str(event_id))
+
+            if event_channel:
+                try:
+                    await event_channel.send(
+                        "✅ 本活動無額外題目需訪談，已直接完成。\n"
+                        "以下為目前已知資訊：\n"
+                        f"{known_block}"
+                    )
+                except Exception:
+                    pass
+
+            await self.disable_management_view(event_id)
+            await self.update_dashboard(event_id)
+            await self.log_event_state(event_id)
+            return
 
         # 3. Send first interview question to all interviewing participants.
         await self._send_initial_interview_prompts(event, event_channel=event_channel)
@@ -2192,65 +2275,6 @@ class Jio(commands.Cog):
             view=view,
             ephemeral=True,
         )
-
-    @discord.slash_command(description="匯出活動狀態 JSON")
-    async def export_status(self, ctx, event_id: str = discord.Option(str, "活動 ID")):
-        import json
-        from bson import ObjectId
-        
-        db = self.bot.get_cog("Database")
-        try:
-            # Validate ObjectId
-            if not ObjectId.is_valid(event_id):
-                await ctx.respond("無效的 Event ID。", ephemeral=True)
-                return
-
-            event = await db.get_event(ObjectId(event_id))
-            if not event:
-                await ctx.respond("找不活動。", ephemeral=True)
-                return
-
-            # Prepare Export Data
-            # Convert ObjectId to str for JSON serialization
-            def json_serial(obj):
-                if isinstance(obj, ObjectId):
-                    return str(obj)
-                raise TypeError ("Type %s not serializable" % type(obj))
-
-            # Construct a "Question Table" view
-            # i.e., Participant Name | Status | Interview Summary
-            export_data = {
-                "event_id": str(event["_id"]),
-                "description": event.get("description"),
-                "participants": []
-            }
-
-            for p in event.get("participants", []):
-                user = self.bot.get_user(p["user_id"])
-                p_data = {
-                    "user_id": p["user_id"],
-                    "username": user.name if user else "Unknown",
-                    "display_name": user.display_name if user else "Unknown",
-                    "status": p["status"],
-                    "answers": (p.get("interview", {}) or {}).get("answers", {}),
-                    "warning_count": p.get("warning_count", 0),
-                    # We can also infer "Pending Questions" if we had a structured way.
-                    # For now just dump what we have.
-                }
-                export_data["participants"].append(p_data)
-
-            file_content = json.dumps(export_data, indent=2, default=json_serial, ensure_ascii=False)
-            
-            # Save to temporary file and send
-            filename = f"status_{event_id}.json"
-            with open(filename, "w", encoding='utf-8') as f:
-                f.write(file_content)
-                
-            await ctx.respond(f"📊 活動狀態匯出: `{event.get('description')}`", file=discord.File(filename))
-            os.remove(filename)
-
-        except Exception as e:
-            await ctx.respond(f"匯出失敗: {e}", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message):

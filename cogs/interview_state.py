@@ -1,17 +1,17 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 class InterviewState(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
     event_id: str
     user_id: str
     current_question_id: str
     answers: Dict[str, Any]
-    draft_answers: Dict[str, str]
     questions: List[Dict[str, Any]]
     dealbreakers: List[str]
-    chat_history: List[Dict[str, Any]]
     is_malicious: bool
-    user_inputs: Dict[int, str]
     participants: Dict[int, Dict[str, Any]]
     extracted: Dict[str, Any]
     route: str
@@ -45,6 +45,7 @@ def normalize_question_id(question_id: Optional[str], questions: List[Dict[str, 
     return questions[0]["id"]
 
 
+# 有用 但不多
 def is_sufficient_answer(text: Any) -> bool:
     value = str(text or "").strip()
     if not value:

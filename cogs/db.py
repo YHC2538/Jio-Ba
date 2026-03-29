@@ -71,6 +71,12 @@ class Database(commands.Cog):
             {"$unset": {"active_event_id": ""}}
         )
 
+    async def clear_user_active_event_if_matches(self, user_id, event_id):
+        await self.users.update_one(
+            {"_id": user_id, "active_event_id": str(event_id)},
+            {"$unset": {"active_event_id": ""}}
+        )
+
     # Event Methods
     async def update_event_message_id(self, event_id, message_id):
         await self.events.update_one(
@@ -191,7 +197,6 @@ class Database(commands.Cog):
             "interview": {
                 "current_question_id": interview_questions[0]["id"] if interview_questions else None,
                 "answers": {},
-                "draft_answers": {},
                 "answer_sources": {},
                 "confirmed": False,
                 "revision_count": 0,
@@ -367,11 +372,13 @@ class Database(commands.Cog):
     async def find_conflicting_interview_event(self, user_id, exclude_event_id=None):
         query = {
             "cancelled": {"$ne": True},
-            "workflow_state": {"$nin": ["CANCELLED", "FAILED_MIN_PARTICIPANTS"]},
+            "workflow_state": {"$nin": ["CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"]},
+            "adjudication_status": {"$nin": ["DECIDED", "CANCELLED"]},
             "participants": {
                 "$elemMatch": {
                     "user_id": user_id,
                     "status": "INTERVIEWING",
+                    "interview.completed": {"$ne": True},
                 }
             },
         }
@@ -394,7 +401,6 @@ class Database(commands.Cog):
                 "interview": {
                     "current_question_id": questions[0]["id"] if questions else None,
                     "answers": {},
-                    "draft_answers": {},
                     "answer_sources": {},
                     "confirmed": False,
                     "revision_count": 0,
@@ -466,7 +472,6 @@ class Database(commands.Cog):
         event_id,
         user_id,
         answers=None,
-        draft_answers=None,
         dealbreakers=None,
         current_question_id=None,
         interview_completed=None,
@@ -479,8 +484,6 @@ class Database(commands.Cog):
 
         if answers is not None:
             set_fields["participants.$.interview.answers"] = answers
-        if draft_answers is not None:
-            set_fields["participants.$.interview.draft_answers"] = draft_answers
         if dealbreakers is not None:
             set_fields["participants.$.dealbreakers"] = dealbreakers
         if current_question_id is not None:
@@ -584,6 +587,50 @@ class Database(commands.Cog):
             )
             participant = await self.get_participant(event_id, user_id)
         return participant
+
+    async def decrement_participant_warning(self, event_id, user_id, reason="MODEL_FALSE_POSITIVE", context=None):
+        event = await self.get_event(event_id)
+        threshold = int(((event or {}).get("warning_policy", {}) or {}).get("threshold", 5))
+
+        participant = await self.get_participant(event_id, user_id)
+        if not participant:
+            return None
+
+        current = int(participant.get("warning_count", 0) or 0)
+        if current <= 0:
+            return participant
+
+        next_count = max(0, current - 1)
+        set_fields = {
+            "participants.$.warning_count": next_count,
+        }
+
+        if participant.get("review_status") == "ON_HOLD" and next_count < threshold:
+            set_fields["participants.$.review_status"] = "CONTINUE"
+            if participant.get("status") == "ON_HOLD":
+                set_fields["participants.$.status"] = "INTERVIEWING"
+                set_fields["participants.$.interview.last_question_status"] = "WAITING_FOR_REPLY"
+            set_fields["participants.$.hold_context"] = {
+                "verdict": "CONTINUE",
+                "reason": f"Warning retracted by agent: {reason}",
+            }
+
+        update = {
+            "$set": set_fields,
+            "$push": {"participants.$.warning_reasons": f"RETRACT:{reason}"},
+        }
+
+        await self.events.update_one(
+            {"_id": event_id, "participants.user_id": user_id},
+            update,
+        )
+
+        if isinstance(context, dict):
+            note = str(context.get("note") or "").strip()
+            if note:
+                await self.append_participant_note(event_id, user_id, note, note_type="private")
+
+        return await self.get_participant(event_id, user_id)
 
     async def apply_host_verdict(self, event_id, user_id, verdict, reason=""):
         normalized = str(verdict or "").strip().upper()
