@@ -118,8 +118,12 @@ async def parse_activity_brief_and_seeds_with_llm(text: str):
 2) brief 應是 1~2 句精簡摘要。
 3) 不要輸出多餘文字。
 """
+        trace_config = {
+            "run_name": "parse_activity_seeds", # 取一個一看就懂的名字
+            "tags": ["jio-ba", "discord", "event_creation"], # 貼上標籤方便過濾
+        }
 
-        resp = await llm.ainvoke(prompt)
+        resp = await llm.ainvoke(prompt, config=trace_config)
         parsed = _safe_json_parse(getattr(resp, "content", ""))
 
         llm_seeds = {}
