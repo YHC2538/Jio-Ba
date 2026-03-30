@@ -94,7 +94,7 @@ async def parse_activity_brief_and_seeds_with_llm(text: str):
         llm = ChatGoogleGenerativeAI(
             model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"),
             google_api_key=api_key,
-            temperature=0,
+            temperature=0.1,
         )
 
         prompt = f"""
@@ -713,10 +713,13 @@ class CancelEventModal(discord.ui.Modal):
         ))
 
     async def callback(self, interaction: discord.Interaction):
+        # 🟢 加上這一行！先告訴 Discord「我收到了，正在處理中」，爭取 15 分鐘的處理時間
+        await interaction.response.defer(ephemeral=True)
+
         reason = self.children[0].value
         jio_cog = self.bot.get_cog("Jio")
         if not jio_cog:
-            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            await interaction.followup.send("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
         # removed defer because edit_message handles it
