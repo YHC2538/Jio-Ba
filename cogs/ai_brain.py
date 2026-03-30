@@ -71,7 +71,7 @@ class AIBrain(commands.Cog):
                     break
 
                 # Per-user debounce avoids bot over-reply while still allowing cross-user parallelism.
-                print(f"[AIBrain] Waiting 1.2s for debounce ({queue_key})...")
+                print(f"[AIBrain] Waiting 0.5s for debounce ({queue_key})...")
                 await asyncio.sleep(0.5)
 
                 queue = self.message_queues.get(queue_key, [])
@@ -176,7 +176,7 @@ class AIBrain(commands.Cog):
                 "answers": interview_data.get("answers", {}) or {},
                 "current_question_id": interview_data.get("current_question_id", ""),
                 "warning_count": (target_participant or {}).get("warning_count", 0),
-                "warning_threshold": ((event.get("warning_policy", {}) or {}).get("threshold", 5)),
+                "warning_threshold": int(((event.get("warning_policy", {}) or {}).get("threshold", 5))),
             }
 
             base_thread_key = f"{event_id}:{target_uid}" if target_uid is not None else str(event_id)
@@ -303,21 +303,36 @@ class AIBrain(commands.Cog):
                                               embed = None
                                               text_to_send = content
                                               log_content = content
+                                              remain_tip = ""
+
+                                              jio_cog = self.bot.get_cog("Jio")
+                                              if jio_cog:
+                                                  remain = jio_cog._remaining_interview_minutes(event or {})
+                                                  if remain is not None:
+                                                      remain_tip = f"\n\n⏳ 面試剩餘時間：約 {remain} 分鐘"
                                               
                                               if content.startswith("EMBED_JSON:"):
                                                   try:
                                                       data = json.loads(content[11:])
+                                                      embed_desc = str(data.get("description", "") or "")
+                                                      if remain_tip:
+                                                          embed_desc = f"{embed_desc}{remain_tip}" if embed_desc else remain_tip.strip()
                                                       embed = discord.Embed(
                                                           title=data.get("title", ""),
-                                                          description=data.get("description", ""),
+                                                          description=embed_desc,
                                                           color=data.get("color", 0x3498db)
                                                       )
                                                       text_to_send = None
-                                                      log_content = data.get("description", "")
+                                                      log_content = embed_desc
                                                   except Exception as embed_err:
                                                       print(f"[DEBUG LOG] Failed to parse embed JSON: {embed_err}")
                                                       text_to_send = content.replace("EMBED_JSON:", "")
+                                                      if remain_tip:
+                                                          text_to_send = f"{text_to_send}{remain_tip}"
                                                       log_content = text_to_send
+                                              elif remain_tip:
+                                                  text_to_send = f"{text_to_send}{remain_tip}"
+                                                  log_content = text_to_send
                                                       
                                               if loading_msg:
                                                   if embed:

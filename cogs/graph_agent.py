@@ -15,7 +15,7 @@ DinnerState = InterviewState
 logger = logging.getLogger(__name__)
 
 # 初始化模型
-llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash"), temperature=0.2)
+llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"), temperature=0.2)
 
 # --- 內部輔助函式 ---
 def _get_current_question_text(state: InterviewState) -> str:
@@ -50,9 +50,9 @@ async def analyze_node(state: InterviewState) -> InterviewState:
 
     【任務 B：答案萃取】
     如果有惡意行為，請在 "is_malicious" 填入 true，並在 "malicious_reason" 說明理由，後續流程將導向警告使用者。
-    如果沒有惡意（is_malicious=false），請接著判斷使用者是否「明確且充分回答」了目前的問題:
+    如果沒有惡意（is_malicious=false），malicious_reason 請直接輸出空字串 ""，接著判斷使用者是否「明確且充分回答」了目前的問題:
     如果有，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。
-    如果使用者給的資訊模糊、反問你、聊天偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 說明為何無法提取。
+    如果使用者給的資訊模糊、反問你、聊天偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 簡要說明為何無法提取 (20字內)。
     
     請務必只輸出 JSON，格式如下：
     {{
@@ -109,15 +109,14 @@ async def reprompt_node(state: InterviewState) -> InterviewState:
     目前正在詢問的問題是：「{current_q_text}」
     剛才的狀況：{analysis}
 
-    請用親切、自然的語氣（繁體中文）向使用者說明你還需要什麼資訊才能繼續，並且要禮貌地引導他們回答。字數不要超過 150 字。
+    請用親切、自然的語氣（繁體中文）向使用者說明你還需要什麼資訊才能繼續，並且要禮貌地引導他們回答。字數不要超過 50 字。
     """)
 
     conversation = [sys_msg] + state.get("messages", [])
     response = await llm.ainvoke(conversation)
 
     return {
-        "messages": [response],
-        "warning_count": state.get("warning_count", 0) + 1  # 增加一次無效回答次數
+        "messages": [response]
     }
 
 async def next_question_node(state: InterviewState) -> InterviewState:
@@ -133,22 +132,17 @@ async def next_question_node(state: InterviewState) -> InterviewState:
     answers = state.get("answers", {})
 
     lines = []
-    next_text = ""
     
     for q in questions:
         q_id = str(q.get("id"))
         text = q.get("text", "")
         if str(next_id) == q_id:
-            lines.append(f"👉 **{text}** *(等待回答...)*")
-            next_text = text
+            lines.append(f"➡️ **{text}** *(等待回答...)*")
         elif q_id in answers:
             lines.append(f"✅ ~~{text}~~")
             lines.append(f"   **回答:** {answers[q_id]}")
         else:
             lines.append(f"⬜ {text}")
-
-    lines.append("")
-    lines.append(f"🤖 **Bot發問：**\n**{next_text}**")
     
     embed_desc = "\n".join(lines)
     if is_sufficient:
@@ -174,10 +168,12 @@ async def malicious_node(state: InterviewState) -> InterviewState:
     reason = state.get("malicious_reason")
     if not reason:
         reason = state.get("extracted", {}).get("malicious_reason", "違反社群規範或活動原則")
+
+    current_q_text = _get_current_question_text(state)
         
     embed_data = {
         "title": f"🚨 系統警告 (第 {warnings}/{threshold} 次) 🚨",
-        "description": f"我們偵測到您的回覆包含不適當的內容。\n\n**判定理由：** {reason}\n\n請注意您的用語，若警告次數達上限，將暫停您的面試資格交由主辦人裁決。",
+        "description": f"我們偵測到您的回覆包含不適當的內容。\n\n**判定理由：** {reason}\n\n請注意您的用語，若警告次數達上限，將暫停您的面試資格交由主辦人裁決。\n\n---\n**➡️ 請重新回答目前問題：**\n{current_q_text}",
         "color": 0xe74c3c
     }
     

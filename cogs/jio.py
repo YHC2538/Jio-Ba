@@ -729,12 +729,14 @@ class CancelEventModal(discord.ui.Modal):
 
 
 class HoldVerdictReasonModal(discord.ui.Modal):
-    def __init__(self, bot, event_id, target_user_id, verdict, *args, **kwargs):
+    def __init__(self, bot, event_id, target_user_id, verdict, source_view=None, source_message=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = bot
         self.event_id = event_id
         self.target_user_id = target_user_id
         self.verdict = verdict
+        self.source_view = source_view
+        self.source_message = source_message
 
         self.add_item(discord.ui.InputText(
             label="裁決原因（必填）",
@@ -753,7 +755,10 @@ class HoldVerdictReasonModal(discord.ui.Modal):
         reason = self.children[0].value
         ok = await db.apply_host_verdict(self.event_id, self.target_user_id, self.verdict, reason=reason)
         if not ok:
-            await interaction.followup.send("❌ 裁決失敗", ephemeral=True)
+            try:
+                await interaction.response.send_message("❌ 裁決失敗", ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send("❌ 裁決失敗", ephemeral=True)
             return
 
         target = self.bot.get_user(self.target_user_id)
@@ -797,10 +802,24 @@ class HoldVerdictReasonModal(discord.ui.Modal):
         if jio_cog:
             await jio_cog.update_dashboard(self.event_id)
 
-        if self.verdict == "KICK":
-            await interaction.followup.send("✅ 已移出該參與者。", ephemeral=True)
-        else:
-            await interaction.followup.send("✅ 已裁決為可繼續訪談。", ephemeral=True)
+        if self.source_view and self.source_message:
+            for child in self.source_view.children:
+                child.disabled = True
+            try:
+                await self.source_message.edit(view=self.source_view)
+            except Exception:
+                pass
+
+        try:
+            if self.verdict == "KICK":
+                await interaction.response.send_message("✅ 已移出該參與者。", ephemeral=True)
+            else:
+                await interaction.response.send_message("✅ 已裁決為可繼續訪談。", ephemeral=True)
+        except discord.errors.InteractionResponded:
+            if self.verdict == "KICK":
+                await interaction.followup.send("✅ 已移出該參與者。", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ 已裁決為可繼續訪談。", ephemeral=True)
 
 
 class HoldVerdictActionView(View):
@@ -817,6 +836,8 @@ class HoldVerdictActionView(View):
             self.event_id,
             self.target_user_id,
             "CONTINUE",
+            source_view=self,
+            source_message=interaction.message,
             title="裁決為繼續",
         )
         await interaction.response.send_modal(modal)
@@ -828,6 +849,8 @@ class HoldVerdictActionView(View):
             self.event_id,
             self.target_user_id,
             "KICK",
+            source_view=self,
+            source_message=interaction.message,
             title="裁決為移出",
         )
         await interaction.response.send_modal(modal)
@@ -2299,18 +2322,12 @@ class Jio(commands.Cog):
 
             participant = await db.get_participant(event_id, message.author.id)
             if participant and participant.get("status") == "ON_HOLD":
-                await message.author.send("目前你的訪談狀態為 ON_HOLD，請等待主揪裁決後再繼續。")
+                await message.author.send("目前你已被暫時停權，請等待主揪裁決後再繼續。")
                 return
             
             # Log User Msg
             await db.append_history(event_id, message.author.id, "user", message.content, author_name=message.author.display_name)
             await db.set_participant_reply_status(event_id, message.author.id, "REPLIED")
-            
-            # Prepare State
-            # Prepare State
-            # OLD LOGIC MOVED TO AIBRAIN TO PREVENT RACE CONDITIONS
-            
-            user_inputs = {message.author.id: message.content}
 
             # Invoke Agent (Via Queue)
             if brain:

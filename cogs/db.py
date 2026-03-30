@@ -637,6 +637,10 @@ class Database(commands.Cog):
         if normalized not in {"CONTINUE", "KICK"}:
             return False
 
+        event = await self.get_event(event_id)
+        threshold = int(((event or {}).get("warning_policy", {}) or {}).get("threshold", 5))
+        continue_warning_count = max(0, threshold - 1)
+
         if normalized == "CONTINUE":
             await self.events.update_one(
                 {"_id": event_id, "participants.user_id": user_id},
@@ -644,6 +648,7 @@ class Database(commands.Cog):
                     "$set": {
                         "participants.$.review_status": "CONTINUE",
                         "participants.$.status": "INTERVIEWING",
+                        "participants.$.warning_count": continue_warning_count,
                         "participants.$.interview.last_question_status": "WAITING_FOR_REPLY",
                         "participants.$.hold_context": {
                             "verdict": "CONTINUE",
