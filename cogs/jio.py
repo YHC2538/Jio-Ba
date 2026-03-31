@@ -423,7 +423,23 @@ class JioEditModal(discord.ui.Modal):
         ))
         
     async def callback(self, interaction: discord.Interaction):
-        # removed defer because edit_message handles it
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except discord.errors.InteractionResponded:
+            deferred = True
+        except Exception:
+            deferred = False
+
+        async def _reply(text: str):
+            if deferred:
+                await interaction.followup.send(text, ephemeral=True)
+                return
+            try:
+                await interaction.response.send_message(text, ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(text, ephemeral=True)
         
         new_title = self.children[0].value
         new_desc = self.children[1].value
@@ -445,14 +461,14 @@ class JioEditModal(discord.ui.Modal):
                 new_deadline = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
                 update_data["signup_deadline"] = new_deadline
             except ValueError:
-                await interaction.followup.send("❌ 報名截止時間格式錯誤，僅已更新其他設定。", ephemeral=True)
+                await _reply("❌ 報名截止時間格式錯誤，僅已更新其他設定。")
 
         if str(interview_input or "").strip():
             try:
                 minutes = int(str(interview_input).strip())
                 update_data["interview_deadline"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
             except ValueError:
-                await interaction.followup.send("❌ 面試截止時間格式錯誤，僅已更新其他設定。", ephemeral=True)
+                await _reply("❌ 面試截止時間格式錯誤，僅已更新其他設定。")
 
         custom_question = str(custom_input or "").strip()
         update_data["host_custom_questions"] = [custom_question] if custom_question else []
@@ -488,7 +504,7 @@ class JioEditModal(discord.ui.Modal):
         if jio_cog:
             await jio_cog.update_dashboard(self.event_id)
             
-        await interaction.followup.send("✅ 設定已更新！", ephemeral=True)
+        await _reply("✅ 設定已更新！")
 
 
 class ManageSelect(discord.ui.Select):
@@ -676,8 +692,44 @@ class AdjudicationView(View):
         self.bot = bot
         self.event_id = event_id
 
+    async def _check_event_actionable(self, interaction: discord.Interaction) -> bool:
+        db = self.bot.get_cog("Database")
+        if not db:
+            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
+            return False
+
+        event = await db.get_event(self.event_id)
+        if not event:
+            await interaction.response.send_message("活動已不存在，按鈕將停用。", ephemeral=True)
+            return False
+
+        closed = (
+            event.get("cancelled")
+            or event.get("workflow_state") in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+            or event.get("adjudication_status") in {"DECIDED", "CANCELLED"}
+        )
+        if not closed:
+            return True
+
+        for child in self.children:
+            child.disabled = True
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+        try:
+            await interaction.response.send_message("此活動已結束，按鈕已停用。", ephemeral=True)
+        except discord.errors.InteractionResponded:
+            await interaction.followup.send("此活動已結束，按鈕已停用。", ephemeral=True)
+        return False
+
     @discord.ui.button(label="採用方案 1", style=discord.ButtonStyle.green)
     async def choose_plan_1(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self._check_event_actionable(interaction):
+            return
+
         jio_cog = self.bot.get_cog("Jio")
         if not jio_cog:
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
@@ -689,6 +741,9 @@ class AdjudicationView(View):
 
     @discord.ui.button(label="採用方案 2", style=discord.ButtonStyle.blurple)
     async def choose_plan_2(self, button: discord.ui.Button, interaction: discord.Interaction):
+        if not await self._check_event_actionable(interaction):
+            return
+
         jio_cog = self.bot.get_cog("Jio")
         if not jio_cog:
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
@@ -736,7 +791,19 @@ class CancelEventModal(discord.ui.Modal):
 
 
 class HoldVerdictReasonModal(discord.ui.Modal):
-    def __init__(self, bot, event_id, target_user_id, verdict, source_view=None, source_message=None, *args, **kwargs):
+    def __init__(
+        self,
+        bot,
+        event_id,
+        target_user_id,
+        verdict,
+        source_view=None,
+        source_message=None,
+        parent_view=None,
+        parent_message=None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.bot = bot
         self.event_id = event_id
@@ -744,6 +811,8 @@ class HoldVerdictReasonModal(discord.ui.Modal):
         self.verdict = verdict
         self.source_view = source_view
         self.source_message = source_message
+        self.parent_view = parent_view
+        self.parent_message = parent_message
 
         self.add_item(discord.ui.InputText(
             label="裁決原因（必填）",
@@ -817,6 +886,14 @@ class HoldVerdictReasonModal(discord.ui.Modal):
             except Exception:
                 pass
 
+        if self.parent_view and self.parent_message:
+            for child in self.parent_view.children:
+                child.disabled = True
+            try:
+                await self.parent_message.edit(view=self.parent_view)
+            except Exception:
+                pass
+
         try:
             if self.verdict == "KICK":
                 await interaction.response.send_message("✅ 已移出該參與者。", ephemeral=True)
@@ -830,11 +907,13 @@ class HoldVerdictReasonModal(discord.ui.Modal):
 
 
 class HoldVerdictActionView(View):
-    def __init__(self, bot, event_id, target_user_id):
+    def __init__(self, bot, event_id, target_user_id, parent_view=None, parent_message=None):
         super().__init__(timeout=300)
         self.bot = bot
         self.event_id = event_id
         self.target_user_id = target_user_id
+        self.parent_view = parent_view
+        self.parent_message = parent_message
 
     @discord.ui.button(label="裁決繼續 (CONTINUE)", style=discord.ButtonStyle.green)
     async def continue_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -845,6 +924,8 @@ class HoldVerdictActionView(View):
             "CONTINUE",
             source_view=self,
             source_message=interaction.message,
+            parent_view=self.parent_view,
+            parent_message=self.parent_message,
             title="裁決為繼續",
         )
         await interaction.response.send_modal(modal)
@@ -858,6 +939,8 @@ class HoldVerdictActionView(View):
             "KICK",
             source_view=self,
             source_message=interaction.message,
+            parent_view=self.parent_view,
+            parent_message=self.parent_message,
             title="裁決為移出",
         )
         await interaction.response.send_modal(modal)
@@ -906,7 +989,13 @@ class HoldKickSelect(discord.ui.Select):
         a = str(hold_context.get("reply") or "(無)")
         reason = str(hold_context.get("participant_reason") or hold_context.get("reason") or "(無)")
 
-        view = HoldVerdictActionView(self.bot, self.event_id, uid)
+        view = HoldVerdictActionView(
+            self.bot,
+            self.event_id,
+            uid,
+            parent_view=self.view,
+            parent_message=interaction.message,
+        )
         msg = (
             f"請選擇裁決動作。\n"
             f"問題：{q}\n"
@@ -1132,18 +1221,44 @@ class Jio(commands.Cog):
             return
 
         channel = await self._resolve_channel(event.get("channel_id"))
-        if not channel:
-            return
-
         message_id = event.get("message_id")
-        if not message_id:
-            return
+        if channel and message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(view=None)
+            except Exception:
+                pass
 
-        try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(view=None)
-        except Exception:
-            pass
+        # Disable adjudication DM buttons as well (e.g., 方案 1 / 方案 2)
+        adjudication_channel_id = event.get("adjudication_view_channel_id")
+        adjudication_message_id = event.get("adjudication_view_message_id")
+        if adjudication_channel_id and adjudication_message_id:
+            adjudication_channel = self.bot.get_channel(adjudication_channel_id)
+            if not adjudication_channel:
+                try:
+                    adjudication_channel = await self.bot.fetch_channel(adjudication_channel_id)
+                except Exception:
+                    adjudication_channel = None
+
+            if adjudication_channel:
+                try:
+                    adjudication_message = await adjudication_channel.fetch_message(adjudication_message_id)
+                    await adjudication_message.edit(view=None)
+                except Exception:
+                    pass
+
+            try:
+                await db.events.update_one(
+                    {"_id": event_id},
+                    {
+                        "$unset": {
+                            "adjudication_view_channel_id": "",
+                            "adjudication_view_message_id": "",
+                        }
+                    },
+                )
+            except Exception:
+                pass
 
     async def build_confirm_submission_view(self, event_id, user_id):
         return ConfirmSubmissionView(self.bot, event_id, user_id)
@@ -1709,10 +1824,7 @@ class Jio(commands.Cog):
         if not user:
             return
 
-        report_lines = [
-            f"📋 揪霸 (Jio Ba) 給主揪的幕僚報告 - {event.get('title', '未命名活動')}",
-            ""
-        ]
+        report_lines = []
 
         questions = event.get("interview_questions", []) or []
         for participant in event.get("participants", []):
@@ -1761,8 +1873,46 @@ class Jio(commands.Cog):
                 f"方案 {index}: {item.get('what')} / {item.get('where')} / {item.get('when')} / 執行方式 {item.get('budget')}"
             )
 
+        report_text = "\n".join(report_lines).strip()
+        if len(report_text) > 3800:
+            report_text = report_text[:3800] + "\n...(內容過長已截斷)"
+
+        report_embed = discord.Embed(
+            title=f"📋 幕僚報告 - {event.get('title', '未命名活動')}",
+            description=report_text or "(無資料)",
+            color=0x9B59B6,
+        )
+
+        choice_lines = []
+        for index, candidate in enumerate(candidates, start=1):
+            item = candidate.get("candidate", {})
+            choice_lines.append(
+                f"**方案 {index}**\n"
+                f"What: {item.get('what') or '待定'}\n"
+                f"Where: {item.get('where') or '待定'}\n"
+                f"When: {item.get('when') or '待定'}\n"
+                f"How: {item.get('how') or item.get('budget') or '待定'}"
+            )
+
+        choice_embed = discord.Embed(
+            title="請選擇最終方案",
+            description="\n\n".join(choice_lines)[:3800],
+            color=0x9B59B6,
+        )
+
         view = AdjudicationView(self.bot, event_id)
-        await user.send("\n".join(report_lines) + "\n\n請由你做最終裁決。", view=view)
+        await user.send(embed=report_embed)
+        choice_message = await user.send(embed=choice_embed, view=view)
+
+        await db.events.update_one(
+            {"_id": event_id},
+            {
+                "$set": {
+                    "adjudication_view_channel_id": choice_message.channel.id,
+                    "adjudication_view_message_id": choice_message.id,
+                }
+            },
+        )
 
     async def apply_adjudication_choice(self, event_id, user_id, choice_index, interaction=None):
         db = self.bot.get_cog("Database")
@@ -1861,15 +2011,34 @@ class Jio(commands.Cog):
             for p in event.get("participants", []):
                 if p.get("status") == "READY":
                     ready_mentions.append(f"<@{p.get('user_id')}>")
-            announce_text = (
-                f"📢 **揪霸 (Jio Ba) 最終方案出爐!**\n"
-                f"{candidate.get('what')}｜{candidate.get('where')}｜{candidate.get('when')}｜執行方式 {candidate.get('budget')}"
+
+            host_name = "Unknown"
+            host_id = event.get("initiator_id")
+            host_user = self.bot.get_user(host_id)
+            if not host_user:
+                try:
+                    host_user = await self.bot.fetch_user(host_id)
+                except Exception:
+                    host_user = None
+            if host_user:
+                host_name = getattr(host_user, "display_name", None) or getattr(host_user, "name", "Unknown")
+
+            announce_embed = discord.Embed(
+                title=f"📢 {event.get('title', '未命名活動')} 最終方案出爐!",
+                color=0x2ECC71,
             )
+            announce_embed.add_field(name="What", value=str(candidate.get("what") or "待定"), inline=False)
+            announce_embed.add_field(name="Where", value=str(candidate.get("where") or "待定"), inline=False)
+            announce_embed.add_field(name="When", value=str(candidate.get("when") or "待定"), inline=False)
+            announce_embed.add_field(name="How", value=str(candidate.get("how") or candidate.get("budget") or "待定"), inline=False)
+            announce_embed.add_field(name="主揪", value=str(host_name), inline=False)
+
+            announce_text = None
             if scheduled_event_id:
-                announce_text += f"\n已建立 Discord Event (ID: {scheduled_event_id})"
+                announce_embed.add_field(name="Discord Event", value=f"ID: {scheduled_event_id}", inline=False)
                 if ready_mentions:
-                    announce_text += "\n請以下通過面試的成員前往活動事件按 Interested：\n" + " ".join(ready_mentions)
-            await channel.send(announce_text)
+                    announce_text = "請以下通過面試的成員前往活動事件按 Interested：\n" + " ".join(ready_mentions)
+            await channel.send(content=announce_text, embed=announce_embed)
 
         await _reply("✅ 已完成裁決並公告。")
 

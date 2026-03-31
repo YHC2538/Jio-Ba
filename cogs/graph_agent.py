@@ -11,7 +11,7 @@ from langchain_core.runnables import RunnableConfig # 記得在最上面 import
 
 from cogs.interview_state import InterviewState, next_question_id
 
-DinnerState = InterviewState
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,14 @@ def _get_current_question_text(state: InterviewState) -> str:
         if q.get("id") == qid:
             return q.get("text", "")
     return ""
+
+class AnalyzeResult(BaseModel):
+    is_malicious: bool = Field(description="判斷使用者是否展現惡意、洗頻或拖延。")
+    malicious_reason: str = Field(description="如果是惡意，請具體說明理由；若無惡意請填空字串。", default="")
+    is_sufficient: bool = Field(description="使用者是否明確且充分回答了目前的問題。")
+    extracted_answer: str = Field(description="若回答充分，請根據前文補全並擷取完整的明確答案；若不充分請填空字串。", default="")
+    analysis: str = Field(description="為何判斷為充分或不充分的理由，限 20 字內。", default="")
+
 
 async def analyze_node(state: InterviewState, config: RunnableConfig) -> InterviewState:        
     """合併版節點：分析使用者輸入，同時檢查是否惡意，並提取答案"""
@@ -61,12 +69,12 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> Intervi
         
     【TASK B：答案萃取】
     1. 如果使用者的回復衝分滿足活動問題的題意，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。
-    2. 如果使用者給的資訊模糊、反問你、不清楚、輕微偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 簡要說明為何無法提取 (20字內)。
+    2. 如果使用者給的資訊模糊、反問你、不清楚、輕微偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 簡要說明為何無法提取 (30字內)。
     3. 針對目前活動的問題，訪問者若先前的回答有說明或提及過某些細節，請務必回顧歷史對話，綜合之前的資訊來判斷是否能針對現在的問題歸納出 「具體答案」，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。並在分析中說明「根據之前的對話紀錄，雖然這次回答模糊，但綜合之前的資訊，我認為是足夠的」或「根據之前的對話紀錄，這次回答反而更模糊了，所以我判定為不充分」。
     
 
     [重要防呆] 
-        1. 萃取精確度規則：如果使用者回覆「對」、「好」、「可以」等同意詞，請務必根據「AI 上一次的追問內容」來補全完整答案。例如 AI 問「大概是傍晚六點到九點嗎？」，User 答「對」，則 extracted_answer 必須精準寫出「傍晚六點到晚上九點」，絕不能只寫「對」或使用者之前模糊的字眼。
+        1. 萃取精確度規則：如果使用者回覆「對」、「好」、「可以」"ok" 等同意詞，請務必根據「AI 上一次的追問內容」來補全完整答案。(例如 AI 問「大概是傍晚六點到九點嗎？」，User 答「對」，則 extracted_answer 必須精準寫出「傍晚六點到晚上九點」，絕不能只寫「對」或使用者之前模糊的字眼)。
     
     
     請務必只輸出 JSON，格式如下：
@@ -146,7 +154,8 @@ async def reprompt_node(state: InterviewState,config: RunnableConfig) -> Intervi
     [NOTE] 
         1. 絕對不允許說出「稍後聯繫」、「先休息」等結束對話的語句，你必須緊抓著目前的問題不放。字數 50 字以內。不要輸出其他無關的文字。
         2. 絕對不要輸出 🚨系統警告 (第 x/y 次) 🚨 的字樣，那是系統判定訊息，你可以參考但不該輸出警告相關內容。
-        3. 你沒有能力做任何問卷功能以外的事情 (例如: 幫使用者訂餐、通知主辦人、跑腿或寫程式等等)，你唯一的任務就是引導使用者回答目前的問題，請不要輸出任何與問卷無關的內容。
+        3. 絕對不應該輸出 "EMBED_JSON: title: 目前問卷進度" 等字，因為那是系統用來顯示進度的訊息，你可以參考但不該直接輸出提示問卷進度的內容。
+        4. 你沒有能力做任何問卷功能以外的事情 (例如: 幫使用者訂餐、通知主辦人、跑腿或寫程式等等)，你唯一的任務就是引導使用者回答目前的問題，請不要輸出任何與問卷無關的內容。
     ===========BELOW ARE PREVIOUS CHAT HISTORY =================
     """)
 
