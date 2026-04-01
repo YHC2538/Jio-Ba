@@ -1,92 +1,82 @@
-
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/othneildrew/Best-README-Template">
+  <a href="https://github.com/YHC2538/Jio-Ba">
     <img src="images/logo.png" alt="Logo" width="100" height="100">
   </a>
 
-  <h3 align="center">揪霸</h3>
+  <h3 align="center">揪霸 Jio-Ba</h3>
 
   <p align="center">
-    每個主揪都該用的揪團小助手
+    把「揪團很麻煩」變成「一句話就開團」的 Discord AI 代理人
     <br />
-    <a href="https://github.com/YHC2538/Jio-Ba"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/YHC2538/Jio-Ba"><strong>查看專案 »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/YHC2538/Jio-Ba">View Demo</a>
+    <a href="https://github.com/YHC2538/Jio-Ba/issues">回報問題</a>
     &middot;
-    <a href="https://github.com/YHC2538/Jio-Ba/issues">Report Bug</a>
-    &middot;
-    <a href="https://github.com/YHC2538/Jio-Ba/issues">Request Feature</a>
+    <a href="https://github.com/YHC2538/Jio-Ba/issues">提出需求</a>
   </p>
 </div>
 
-
-每次想揪朋友一起出去玩，卻因為要喬時間、地點、做甚麼，嫌麻煩而作罷? 傳統揪團常遇到從眾效應、資訊超載與多方需求難以妥協的問題，所以主揪常常會需要花大把的時間溝通活動參與者的意願，非常沒有效率。
-揪霸就因此誕生了!!
-
-以 AI 為核心的 Discord 揪團機器人，主揪以及所有活動參與者，只需要透過簡單的自然語言與揪霸對答，揪霸會將模糊的自然語言轉化為結構化參數，並透過機制設計中的 **Nash Social Welfare (NSW)** 演算法，計算出帕雷托最適 (Pareto Optimal) 的活動方案（包含 What, Where, When），最後由發起人裁決並自動建立 Discord Event。
-就能輕鬆敲定活動細節，降低多人協調成本。
-
 [English README](./README.md)
 
+## 🤖 為什麼是揪霸？
 
+你應該也遇過這種情境：
 
-## 使用方式與流程概覽
+- 一群人都說「都可以」，最後什麼都喬不成。
+- 訊息洗到看不到重點，主揪只能手動整理每個人的需求。
+- 不同人的時間、地點偏好衝突，總有一方被迫妥協。
 
-1. 主揪在伺服器執行 `/jio`。
-2. Bot 顯示建立表單，並發出活動卡。
-3. 主揪以自然語言填寫活動名稱、條件以及活動說明 (填寫 what,where,when,how)。
-4. 揪霸根據未決定的 what,where,when,how，智慧生成對應的訪問問題。
-5. 參與者加入後進入面試狀態。
-6. Bot 於 DM 先送題目總覽，再逐題訪談。
-7. 所以參與者以自然語言回答。
-8. 產生候選方案後由主揪定案，揪霸自動公告。
+揪霸的定位，不只是「幫你問問題」的機器人，而是 **Discord 裡的活動協調中控台**：
 
+1. 把自然語言需求轉成結構化 4W1H。
+2. 用 DM 訪談流程收斂每個人的真實偏好。
+3. 將惡意或不配合回覆暫時停權並隔離到 ON_HOLD，交由主揪裁決。
+4. 最後用 Nash Social Welfare (NSW) 產生候選方案，讓主揪快速定案。
 
+## 📢 核心能力
 
-## 💎 揪霸主要功能
+- 活動建立與管理（標題、說明、截止時間、最低成團人數、自訂題目）。
+- 自動抽取與展示 4W1H seeds（What/Where/When/How，必要時含 Why）。
+- AI 動態生成訪談題目（依缺失資訊補題，而不是固定問卷）。
+- DM 訪談流程（逐題、追問、確認送出）。
+- 對付惡意參與者（warning、ON_HOLD、主揪裁決 CONTINUE/KICK）。
+- 頻道儀表板即時更新（Joined/Interviewing/ON_HOLD/Ready/Kicked）。
+- 最終方案公告與 Discord Scheduled Event 串接。
 
-- 全自然語言對答。
-- 揪霸具有上下文記憶功能。
-- 支援報名截止、面試截止、最低成團人數、自訂問題等功能。
-- 可根據活動描述產生訪談題目。
-- 智慧警告惡意不配合的活動參與者。
-- 惡意參與者警告次數達門檻後進入停權狀態 (ON_HOLD)，等待主揪裁決。
-- 參與者有 Confirm/Edit 最終確認流程。
-- 頻道儀表板即時更新參與者狀態。
-- 使用最大化 Nash Social Welfare 演算法，計算出前兩個候選方案讓主揪裁決。
+## 🔑 使用流程（Host 視角）
 
-### TODO:
-- [ ] 長期紀錄參與者偏好
-- [ ] 發起多個活動
-- [ ] 修改答案
-- [ ] 全 manual 填寫功能
+1. 在伺服器輸入 `/jio`。
+2. 填寫活動資訊，送出後產生活動卡與 Join 按鈕。
+3. 參與者加入後，報名截止或主揪提早結束報名，系統啟動 DM 面試。
+4. 面試完成後，系統產生幕僚報告與候選方案給主揪。
+5. 主揪按下裁決方案，系統公告最終結果並結束流程。
 
-
-
-## 📝 目前指令
+## 📜 目前可用指令
 
 - `/jio`
-   發起活動。
+  發起活動（可帶入標題與時間限制等參數）。
 - `/verdict`
-   開啟 ON_HOLD 裁決介面。
+  開啟 ON_HOLD 成員裁決介面。
 
-## ⚓ 架構與模組 (這部分有 outdated, 需要修改)
+## ⚓ 架構與模組
+
+採用 LangChain 以及 LangGraph 構建 AI Agent 的工作流程
 
 - `main.py`
-   啟動機器人、檢查環境變數、載入 cogs。
+  Bot 啟動入口、環境檢查、載入 cogs。
 - `cogs/jio.py`
-   Slash Commands、Discord UI、活動儀表板、流程編排。
+  Slash Commands、Discord UI、活動流程協調、儀表板更新。
 - `cogs/ai_brain.py`
-   佇列、debounce、呼叫 LangGraph。
+  參與者訊息佇列、debounce、LangGraph 呼叫與回寫狀態。
 - `cogs/graph_agent.py`
-   訪談圖節點：gatekeeper、extractor、reprompt、finalize、hold、malicious。
+  訪談圖節點（analyze / reprompt / next_question / malicious / hold / finalize）。
 - `cogs/db.py`
-   MongoDB CRUD 與狀態遷移。
+  MongoDB 存取、活動與參與者狀態遷移。
 - `cogs/matching/nsw_calculator.py`
-   候選方案評分與排序。
+  NSW 候選方案評分與排序。
 
 ## 📌 環境需求
 
@@ -106,19 +96,29 @@ GOOGLE_API_KEY=你的_google_api_key
 GOOGLE_API_ENDPOINT=https://generativelanguage.googleapis.com
 ```
 
-## ✈️ 本機啟動
+## ✈️ 本機安裝
+
+### 使用 pip
 
 ```bash
-python -m venv .venv
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install .
 python main.py
+```
+
+
+### 使用 uv
+
+```bash
+# 1) 安裝相依套件（依 pyproject.toml，若有 uv.lock 會一併採用）
+uv sync
+
+# 2) 啟動 Bot
+uv run python main.py
 ```
 
 ## ⛰️ PM2 部署
 
-專案內含 `ecosystem.config.js`：
+專案內含 `ecosystem.config.js`，可依部署環境調整 Python interpreter 路徑後啟用：
 
 ```bash
 pm2 start ecosystem.config.js
@@ -128,8 +128,9 @@ pm2 save
 
 ## 💡 運維備註
 
-- 需開啟 Message Content Intent 才能完整使用 DM 訪談能力。
-- 權限不足時，啟動流程可能切換到 limited mode。
+- 請在 Discord Developer Portal 開啟 Message Content Intent，否則 DM 訪談能力會受限。
+- 若權限不足，系統可能進入 limited mode。
+- `/jio` 需在伺服器頻道執行，非 DM。
 
 ## 💰 Credits
 

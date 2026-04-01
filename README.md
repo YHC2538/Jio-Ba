@@ -1,122 +1,123 @@
-# Jio-Ba
+<!-- PROJECT LOGO -->
+<br />
+<div align="center">
+  <a href="https://github.com/YHC2538/Jio-Ba">
+    <img src="images/logo.png" alt="Logo" width="100" height="100">
+  </a>
 
-AI-assisted Discord bot for organizing group activities through structured DM interviews, host review, and final plan adjudication.
+  <h3 align="center">Jio-Ba</h3>
+
+  <p align="center">
+    Turn "group planning is painful" into "one sentence and the event is live".
+    <br />
+    <a href="https://github.com/YHC2538/Jio-Ba"><strong>View the project »</strong></a>
+    <br />
+    <br />
+    <a href="https://github.com/YHC2538/Jio-Ba/issues">Report a bug</a>
+    &middot;
+    <a href="https://github.com/YHC2538/Jio-Ba/issues">Request a feature</a>
+  </p>
+</div>
 
 [Traditional Chinese README](./README.zh-TW.md)
 
-## What This Project Does
+## 🤖 Why Jio-Ba?
 
-Jio-Ba helps a host run an activity flow end to end:
+You’ve probably run into this situation before:
 
-1. Create an activity card in a server using `/jio`.
-2. Let participants join with a button.
-3. Interview participants in DM with AI-guided, question-by-question collection.
-4. Handle off-topic or risky replies with warning and ON_HOLD review flow.
-5. Generate candidate plans for the host and finalize one plan.
-6. Announce the final result and optionally create a Discord Scheduled Event.
+- Everyone says "anything works", and the group still never converges.
+- Messages get buried, and the host has to manually summarize everyone’s needs.
+- Conflicting preferences around time and location leave someone stuck compromising.
 
-## Key Features
+Jio-Ba is not just a bot that helps you ask questions. It is a **Discord activity coordination console**:
 
-- Server-only activity creation with `/jio`.
-- Rich Discord UI with modals, buttons, and select menus.
-- Loading animation while creating the activity card.
-- Configurable signup and interview deadlines.
-- Dynamic interview question generation from title/description/seeds.
-- Per-user concurrent DM interview processing:
-   same activity can interview multiple participants at once.
-- Debounced processing per participant to avoid noisy over-replies.
-- Multi-turn answer accumulation:
-   partial answers can be merged across turns before final acceptance.
-- Warning policy with threshold and ON_HOLD escalation.
-- Host adjudication UI for ON_HOLD participants: CONTINUE or KICK.
-- Confirm/Edit final submission flow for participant answers.
-- Dashboard updates in channel with participant states.
-- Export command for event status snapshots.
+1. Turn natural-language requests into structured 4W1H.
+2. Use a DM interview flow to narrow down each participant’s real preferences.
+3. Temporarily suspend malicious or uncooperative replies into ON_HOLD and let the host decide.
+4. Use Nash Social Welfare (NSW) at the end to generate candidate plans and let the host finalize one quickly.
 
-## Current Commands
+## 📢 Core Capabilities
+
+- Activity creation and management (title, description, deadlines, minimum participant count, custom questions).
+- Automatic extraction and display of 4W1H seeds (What/Where/When/How, and Why when needed).
+- AI-generated interview questions that fill in missing information instead of using a fixed questionnaire.
+- DM interview flow (question-by-question, follow-up, and confirmation before submission).
+- Handling malicious participants with warnings, ON_HOLD, and host verdicts CONTINUE/KICK.
+- Real-time channel dashboard updates (Joined/Interviewing/ON_HOLD/Ready/Kicked).
+- Final-plan announcement and Discord Scheduled Event integration.
+
+## 🔑 Host Flow
+
+1. Enter `/jio` in a server.
+2. Fill in the activity information, then the bot posts the activity card and Join button.
+3. After participants join, signup closes or the host ends it early, and the DM interview starts.
+4. Once interviews finish, the system generates a staff report and candidate plans for the host.
+5. The host chooses the final plan, and the bot announces the result and closes the flow.
+
+## 📜 Available Commands
 
 - `/jio`
-   create a new activity (supports optional fields such as title and limits).
+  Start an activity (supports parameters such as title and time limits).
 - `/verdict`
-   open ON_HOLD adjudication UI for host.
-- `/export_status`
-   export event status as JSON.
+  Open the ON_HOLD member adjudication UI.
 
-## High-Level Flow
+## ⚓ Architecture and Modules
 
-1. Host runs `/jio` in a server channel.
-2. Bot shows creation modal, then posts activity embed with `Join` button.
-3. Participants join and are moved into interview pipeline.
-4. Bot sends DM interview overview and asks questions one by one.
-5. Participant state moves through `PENDING`, `INTERVIEWING`, `READY`, `ON_HOLD`, or `KICKED`.
-6. Host can review ON_HOLD participants and decide continue/kick.
-7. Bot prepares candidate plans and host selects final plan.
-
-## Architecture
+Built with LangChain and LangGraph to structure the AI agent workflow.
 
 - `main.py`
-   bootstraps the bot, validates environment, loads cogs.
+  Bot entry point, environment checks, and cog loading.
 - `cogs/jio.py`
-   slash commands, Discord UI, state dashboard, interview orchestration.
+  Slash commands, Discord UI, activity orchestration, and dashboard updates.
 - `cogs/ai_brain.py`
-   queueing, debouncing, and LangGraph invocation orchestration.
+  Participant message queue, debounce, LangGraph calls, and state write-back.
 - `cogs/graph_agent.py`
-   interview graph nodes: gatekeeper, extractor, reprompt, finalize, hold, malicious.
+  Interview graph nodes (analyze / reprompt / next_question / malicious / hold / finalize).
 - `cogs/db.py`
-   MongoDB CRUD, participant/event state transitions, warning policy helpers.
+  MongoDB access, and activity and participant state transitions.
 - `cogs/matching/nsw_calculator.py`
-   candidate ranking helpers.
+  NSW candidate plan scoring and ranking.
 
-## Data and State Highlights
-
-- Event document stores:
-   activity metadata, interview question set, participants, warning policy, workflow status.
-- Participant interview stores:
-   `current_question_id`, `answers`, `draft_answers`, `revision_count`, `confirmed`, `completed`.
-- Warning policy stores:
-   threshold and final revision limits.
-
-## Requirements
+## 📌 Requirements
 
 - Python `>=3.10,<3.11`
 - MongoDB
-- Discord bot token
-- Google API key for Gemini access
+- Discord Bot Token
+- Google API Key (Gemini)
 
-Core dependencies are listed in `requirements.txt` and `pyproject.toml`.
+## 📁 Environment Variables
 
-## Environment Variables
-
-Required in `.env`:
+Set these in `.env`:
 
 ```env
-DISCORD_TOKEN=your_discord_bot_token
+DISCORD_TOKEN=your_discord_token
 MONGO_URI=your_mongodb_uri
 GOOGLE_API_KEY=your_google_api_key
 GOOGLE_API_ENDPOINT=https://generativelanguage.googleapis.com
 ```
 
-Optional:
+## ✈️ Local Installation
 
-```env
-GEMINI_MODEL_NAME=gemini-2.0-flash
-```
-
-## Local Setup
+### Using pip
 
 ```bash
-python -m venv .venv
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install .
 python main.py
 ```
 
-If your machine has multiple Python installations, run with the venv interpreter directly.
+### Using uv
 
-## Production
+```bash
+# 1) Install dependencies according to pyproject.toml (uv.lock will also be used if present)
+uv sync
 
-`ecosystem.config.js` is included for PM2-based process management.
+# 2) Start the bot
+uv run python main.py
+```
+
+## ⛰️ PM2 Deployment
+
+The repository includes `ecosystem.config.js`, which can be enabled after adjusting the Python interpreter path for your environment:
 
 ```bash
 pm2 start ecosystem.config.js
@@ -124,23 +125,12 @@ pm2 logs
 pm2 save
 ```
 
-## Operational Notes
+## 💡 Ops Notes
 
-- Message Content Intent is required for DM interview behavior.
-- If privileged intents are missing, startup may switch to limited mode.
-- `/jio` must be used in a server, not DM.
-- This project currently enforces a single active interview context per user to reduce cross-event confusion.
+- Enable Message Content Intent in the Discord Developer Portal, otherwise DM interview behavior will be limited.
+- If permissions are insufficient, the system may enter limited mode.
+- `/jio` must be run in a server channel, not in DM.
 
-## Testing and Diagnostics
+## 💰 Credits
 
-Utility scripts in repository include:
-
-- `test_llm_connection.py`
-- `test_google_search.py`
-- `verify_agent.py`
-- `show_cost.py`
-- `inspect_genai.py`
-
-## License
-
-See project license file if provided.
+Original project design by rlongdragon
