@@ -303,7 +303,7 @@ class AIBrain(commands.Cog):
                                               embed = None
                                               text_to_send = content
                                               log_content = content
-                                              remain_tip = ""
+                                              remain_tip = "\n\n⏳ 面試剩餘時間：未設定"
 
                                               jio_cog = self.bot.get_cog("Jio")
                                               if jio_cog:

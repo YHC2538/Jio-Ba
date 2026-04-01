@@ -454,6 +454,33 @@ class JioEditModal(discord.ui.Modal):
             "title": new_title,
             "description": new_desc if new_desc else "（由大家討論決定）",
         }
+
+        title_changed = bool(event) and str(event.get("title") or "").strip() != str(new_title or "").strip()
+        desc_changed = bool(event) and str(event.get("description") or "").strip() != str(update_data["description"] or "").strip()
+
+        if event and (title_changed or desc_changed):
+            existing_seeds = event.get("activity_seeds", {}) or {}
+            seed_input = f"標題: {new_title}\n說明: {update_data['description']}"
+            parsed_brief, parsed_seeds = await parse_activity_brief_and_seeds_with_llm(seed_input)
+
+            merged_seeds = {
+                "what": str((existing_seeds.get("what") or parsed_seeds.get("what") or "")).strip() or None,
+                "where": str((existing_seeds.get("where") or parsed_seeds.get("where") or "")).strip() or None,
+                "when": str((existing_seeds.get("when") or parsed_seeds.get("when") or "")).strip() or None,
+                "how": str((existing_seeds.get("how") or parsed_seeds.get("how") or "")).strip() or None,
+                "why": str((existing_seeds.get("why") or parsed_seeds.get("why") or "")).strip() or None,
+            }
+
+            # 新資訊優先覆蓋舊 seeds，讓「需提問主題」能跟著更新
+            for key in ["what", "where", "when", "how", "why"]:
+                candidate = str((parsed_seeds or {}).get(key) or "").strip()
+                if candidate:
+                    merged_seeds[key] = candidate
+
+            update_data["activity_seeds"] = merged_seeds
+
+            if str(new_desc or "").strip() == "" and str(parsed_brief or "").strip():
+                update_data["description"] = str(parsed_brief).strip()
         
         if str(signup_input or "").strip():
             try:
@@ -474,7 +501,7 @@ class JioEditModal(discord.ui.Modal):
         update_data["host_custom_questions"] = [custom_question] if custom_question else []
 
         if event and event.get("active", True):
-            seeds = event.get("activity_seeds", {}) or {}
+            seeds = update_data.get("activity_seeds") or event.get("activity_seeds", {}) or {}
             rebuilt_questions = await db._build_interview_questions(
                 title=new_title,
                 description=update_data["description"],
@@ -664,7 +691,15 @@ class JoinView(View):
             )
             return
 
-        # removed defer because edit_message handles it
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except discord.errors.InteractionResponded:
+            deferred = True
+        except Exception:
+            deferred = False
+
         db = self.bot.get_cog("Database")
 
         await db.add_participant(self.event_id, interaction.user.id)
@@ -682,8 +717,14 @@ class JoinView(View):
         if jio_cog:
             await jio_cog.update_dashboard(self.event_id)
             await jio_cog.log_event_state(self.event_id)
-            
-        await interaction.followup.send("✅ 已加入活動！\n⏳ 報名截止後，Bot 會私訊你開始訪談。", ephemeral=True)
+
+        if deferred:
+            await interaction.followup.send("✅ 已加入活動！\n⏳ 報名截止後，Bot 會私訊你開始訪談。", ephemeral=True)
+        else:
+            try:
+                await interaction.response.send_message("✅ 已加入活動！\n⏳ 報名截止後，Bot 會私訊你開始訪談。", ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send("✅ 已加入活動！\n⏳ 報名截止後，Bot 會私訊你開始訪談。", ephemeral=True)
 
 
 class AdjudicationView(View):
@@ -2499,6 +2540,12 @@ class Jio(commands.Cog):
             participant = await db.get_participant(event_id, message.author.id)
             if participant and participant.get("status") == "ON_HOLD":
                 await message.author.send("目前你已被暫時停權，請等待主揪裁決後再繼續。")
+                return
+
+            interview = (participant or {}).get("interview", {}) or {}
+            if participant and (interview.get("completed") or participant.get("status") in {"READY", "FINISHED"}):
+                detail = await self.describe_current_interview_state(event, message.author.id)
+                await message.author.send(f"✅ 你在此活動的面試已完成。\n{detail}")
                 return
             
             # Log User Msg
