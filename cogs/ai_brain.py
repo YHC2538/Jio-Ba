@@ -221,6 +221,7 @@ class AIBrain(commands.Cog):
             try:
                 print(f"[DEBUG LOG] Starting graph.ainvoke with inputs: {user_inputs}")
                 loading_msg = None
+                entered_confirm_stage = False
                 if target_uid:
                     try:
                         user_for_loading = self.bot.get_user(int(target_uid)) or await self.bot.fetch_user(int(target_uid))
@@ -258,6 +259,7 @@ class AIBrain(commands.Cog):
                          ans = final_state.get("answers", {})
                          cqid = final_state.get("current_question_id", "")
                          completed = final_state.get("interview_completed", False)
+                         entered_confirm_stage = str(cqid or "") == "confirm_submit" and not bool(completed)
 
                          await db_cog.update_participant_interview(
                              _event_id_obj, _uid,
@@ -311,6 +313,33 @@ class AIBrain(commands.Cog):
                         await jio_cog.maybe_trigger_adjudication(ObjectId(event_id) if ObjectId.is_valid(event_id) else event_id)
                     except Exception as adjudication_err:
                         print(f"[DEBUG LOG] maybe_trigger_adjudication failed after graph run: {adjudication_err}")
+
+                if entered_confirm_stage and target_uid and jio_cog:
+                    try:
+                        user = self.bot.get_user(int(target_uid))
+                        if not user:
+                            user = await self.bot.fetch_user(int(target_uid))
+
+                        sent_msg = await jio_cog.send_submission_review(
+                            ObjectId(event_id) if ObjectId.is_valid(event_id) else event_id,
+                            int(target_uid),
+                            user=user,
+                            message_to_edit=loading_msg,
+                            event=event,
+                        )
+
+                        if not sent_msg and loading_msg:
+                            await loading_msg.edit(content="🧾 請確認你的最終回答（系統正在重試建立確認卡片）")
+
+                        await db_cog.append_history(
+                            ObjectId(event_id),
+                            target_uid,
+                            "model",
+                            "Entered final review stage. Waiting for participant confirm/edit via submission card.",
+                        )
+                    except Exception as review_err:
+                        print(f"[DEBUG LOG] Failed to send submission review card: {review_err}")
+                    return final_state
                 
                 messages = final_state.get("messages", [])
                 if messages:

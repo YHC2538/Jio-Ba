@@ -102,7 +102,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> Intervi
     【TASK B：答案萃取】
     1. 如果使用者的回復衝分滿足活動問題的題意，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。
     2. 如果使用者給的資訊模糊、反問你、不清楚、輕微偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 簡要說明為何無法提取 (30字內)。
-    3. 針對目前活動的問題，訪問者若先前的回答有說明或提及過某些細節，請務必回顧歷史對話，綜合之前的資訊來判斷是否能針對現在的問題歸納出 「具體答案」，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。並在分析中說明「根據之前的對話紀錄，雖然這次回答模糊，但綜合之前的資訊，我認為是足夠的」或「根據之前的對話紀錄，這次回答反而更模糊了，所以我判定為不充分」。
+    3. 針對目前活動的問題，訪問者若先前的回答有說明或提及過某些細節，請務必回顧整個 AI 與 User 的歷史對話，綜合之前的資訊來判斷是否能針對現在的問題歸納出 「具體答案」，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。並在分析中說明「根據之前的對話紀錄，雖然這次回答模糊，但綜合之前的資訊，我認為是足夠的」或「根據之前的對話紀錄，這次回答反而更模糊了，所以我判定為不充分」。
     
     ⚠️萃取精確度規則：如果使用者回覆「對」、「好」、「可以」"ok" 等同意詞，請務必根據「AI 上一次的追問內容」來補全完整答案。(例如 AI 問「大概是傍晚六點到九點嗎？」，User 答「對」，則 extracted_answer 必須精準寫出「傍晚六點到晚上九點」，絕不能只寫「對」或使用者之前模糊的字眼)。
     ===========BELOW ARE PREVIOUS CHAT HISTORY =================     
@@ -206,8 +206,18 @@ async def next_question_node(state: InterviewState) -> InterviewState:
     is_sufficient = state.get("extracted", {}).get("is_sufficient", False)
 
     if next_id == "completed":
-        # 結束報名或完成問卷
-        return {"current_question_id": "completed", "route": "finalize"}
+        embed_data = {
+            "title": "🧾 進入最終確認",
+            "description": "你已回答完所有題目。請先確認所有答案，若需調整可手動修改，確認無誤後再按 Confirm。",
+            "color": 0x9B59B6,
+        }
+        return {
+            "current_question_id": "confirm_submit",
+            "confirm_submit": True,
+            "interview_completed": False,
+            "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")],
+            "route": "standby",
+        }
 
     questions = state.get("questions", [])
     answers = state.get("answers", {})
@@ -235,7 +245,6 @@ async def next_question_node(state: InterviewState) -> InterviewState:
         "color": 0x2ecc71 if is_sufficient else 0x3498db
     }
     
-    import json
     return {
         "current_question_id": next_id, # 更新狀態的指標到下一題
         "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")],
@@ -258,7 +267,6 @@ async def malicious_node(state: InterviewState) -> InterviewState:
         "color": 0xe74c3c
     }
     
-    import json
     msg = AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")
     
     return {
@@ -272,7 +280,6 @@ async def hold_node(state: InterviewState) -> InterviewState:
         "description": "因為多次違規或無法獲得明確的回應，您的面試流程已暫時停權。\n\n後續結果將交由活動發起人定奪，請靜候通知。",
         "color": 0x95a5a6
     }
-    import json
     return {
         "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")]
     }
@@ -283,7 +290,6 @@ async def finalize_node(state: InterviewState) -> InterviewState:
         "description": "太感謝啦！你的所有回答我都記錄起來了，我已經整理給主辦人了。後續如果活動方案確定就會通知你參與活動哦！",
         "color": 0xf1c40f
     }
-    import json
     return {
         "interview_completed": True,
         "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")]

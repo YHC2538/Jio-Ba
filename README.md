@@ -5,8 +5,7 @@
     <img src="images/logo.png" alt="Logo" width="150" height="150">
   </a>
 
-  <h3 align="center">Jio-Ba</h3>
-
+  <h1 align="center">Jio-Ba</h1>
   <p align="center">
     Turn "group planning is painful" into a Discord AI assistant that can launch the event in one sentence.
     <br />

@@ -1216,7 +1216,7 @@ class ConfirmEditQuestionSelect(discord.ui.Select):
         self.event_id = event_id
         self.user_id = user_id
         super().__init__(
-            placeholder="選擇要修改的題目（每題最多改一次）",
+            placeholder="選擇要手動修改答案的題目",
             min_values=1,
             max_values=1,
             options=options,
@@ -1232,8 +1232,133 @@ class ConfirmEditQuestionSelect(discord.ui.Select):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        # removed defer because edit_message handles it
-        await jio_cog.enter_edit_question_mode(self.event_id, self.user_id, self.values[0], interaction)
+        await jio_cog.open_manual_edit_modal(
+            self.event_id,
+            self.user_id,
+            self.values[0],
+            interaction,
+            source_view=self.view,
+            source_message=interaction.message,
+        )
+
+
+class ManualAnswerEditModal(discord.ui.Modal):
+    def __init__(
+        self,
+        bot,
+        event_id,
+        user_id,
+        question_id,
+        question_text,
+        current_answer,
+        source_view=None,
+        source_message=None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.bot = bot
+        self.event_id = event_id
+        self.user_id = user_id
+        self.question_id = question_id
+        self.question_text = str(question_text or "")
+        self.source_view = source_view
+        self.source_message = source_message
+
+        self.add_item(build_optional_input_text(
+            label="問題（僅供參考）",
+            value=self.question_text[:4000],
+            style=discord.InputTextStyle.long,
+            min_length=0,
+        ))
+        self.add_item(discord.ui.InputText(
+            label="請填寫新的答案",
+            value=str(current_answer or "")[:4000],
+            placeholder="直接手動輸入你的最終答案",
+            style=discord.InputTextStyle.long,
+            required=True,
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except discord.errors.InteractionResponded:
+            deferred = True
+        except Exception:
+            deferred = False
+
+        async def _reply(text: str):
+            if deferred:
+                await interaction.followup.send(text, ephemeral=True)
+                return
+            try:
+                await interaction.response.send_message(text, ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(text, ephemeral=True)
+
+        db = self.bot.get_cog("Database")
+        jio_cog = self.bot.get_cog("Jio")
+        if not db or not jio_cog:
+            await _reply("系統忙碌中，請稍後再試。")
+            return
+
+        event = await db.get_event(self.event_id)
+        participant = await db.get_participant(self.event_id, self.user_id)
+        if not event or not participant:
+            await _reply("找不到面試資料。")
+            return
+
+        if event.get("cancelled") or event.get("workflow_state") in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}:
+            await _reply("活動已結束，無法再修改答案。")
+            return
+
+        interview = participant.get("interview", {}) or {}
+        if interview.get("completed") or interview.get("confirmed"):
+            await _reply("你已確認送出，無法再修改。")
+            return
+
+        question_ids = {str(q.get("id") or "") for q in (event.get("interview_questions", []) or [])}
+        if str(self.question_id) not in question_ids:
+            await _reply("找不到該題目，請重新開啟確認卡片。")
+            return
+
+        new_answer = str(self.children[1].value or "").strip()
+        if not new_answer:
+            await _reply("答案不可為空白。")
+            return
+
+        answers = dict(interview.get("answers", {}) or {})
+        old_answer = str(answers.get(self.question_id) or "").strip()
+        answers[self.question_id] = new_answer
+
+        await db.update_participant_interview(
+            self.event_id,
+            self.user_id,
+            answers=answers,
+            current_question_id="confirm_submit",
+            interview_completed=False,
+            confirmed=False,
+        )
+        await db.update_participant_status(self.event_id, self.user_id, "INTERVIEWING")
+        await db.append_history(
+            self.event_id,
+            self.user_id,
+            "system",
+            f"Participant manually edited answer for {self.question_id}: '{old_answer}' -> '{new_answer}'",
+        )
+
+        if self.source_message:
+            await jio_cog.send_submission_review(
+                self.event_id,
+                self.user_id,
+                message_to_edit=self.source_message,
+            )
+
+        await jio_cog.update_dashboard(self.event_id)
+        await jio_cog.log_event_state(self.event_id)
+        await _reply("✅ 已更新該題答案，請再次確認所有內容後按 Confirm。")
 
 
 class ConfirmEditQuestionView(View):
@@ -1243,13 +1368,15 @@ class ConfirmEditQuestionView(View):
 
 
 class ConfirmSubmissionView(View):
-    def __init__(self, bot, event_id, user_id):
+    def __init__(self, bot, event_id, user_id, options=None):
         super().__init__(timeout=600)
         self.bot = bot
         self.event_id = event_id
         self.user_id = user_id
+        if options:
+            self.add_item(ConfirmEditQuestionSelect(bot, event_id, user_id, options))
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green, row=1)
     async def confirm_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("這不是你的確認按鈕。", ephemeral=True)
@@ -1260,27 +1387,26 @@ class ConfirmSubmissionView(View):
             await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
             return
 
-        # removed defer because edit_message handles it
+        deferred = False
+        try:
+            await interaction.response.defer(ephemeral=True)
+            deferred = True
+        except discord.errors.InteractionResponded:
+            deferred = True
+        except Exception:
+            deferred = False
+
         self.clear_items()
         try:
             await interaction.message.edit(view=self)
         except Exception:
             pass
-        await jio_cog.confirm_submission_from_button(self.event_id, self.user_id, interaction)
-
-    @discord.ui.button(label="Edit", style=discord.ButtonStyle.blurple)
-    async def edit_btn(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("這不是你的修改按鈕。", ephemeral=True)
-            return
-
-        jio_cog = self.bot.get_cog("Jio")
-        if not jio_cog:
-            await interaction.response.send_message("系統忙碌中，請稍後再試。", ephemeral=True)
-            return
-
-        # removed defer because edit_message handles it
-        await jio_cog.open_edit_question_selector(self.event_id, self.user_id, interaction)
+        await jio_cog.confirm_submission_from_button(
+            self.event_id,
+            self.user_id,
+            interaction,
+            deferred=deferred,
+        )
 
 
 
@@ -1370,14 +1496,111 @@ class Jio(commands.Cog):
             except Exception:
                 pass
 
-    async def build_confirm_submission_view(self, event_id, user_id):
-        return ConfirmSubmissionView(self.bot, event_id, user_id)
+    def _build_submission_edit_options(self, event, participant):
+        questions = (event or {}).get("interview_questions", []) or []
+        answers = ((participant or {}).get("interview", {}) or {}).get("answers", {}) or {}
 
-    async def confirm_submission_from_button(self, event_id, user_id, interaction: discord.Interaction):
+        options = []
+        for idx, question in enumerate(questions, start=1):
+            qid = str(question.get("id") or "")
+            qtext = str(question.get("text") or "").strip()
+            if not qid or not qtext:
+                continue
+
+            answer_preview = str(answers.get(qid) or "尚未填寫").replace("\n", " ").strip()
+            options.append(
+                discord.SelectOption(
+                    label=f"{idx}. {qtext}"[:100],
+                    value=qid,
+                    description=f"目前答案：{answer_preview}"[:100],
+                )
+            )
+        return options
+
+    async def build_submission_review_embed(self, event_id, user_id, event=None, participant=None):
+        db = self.bot.get_cog("Database")
+        event = event or (await db.get_event(event_id) if db else None)
+        participant = participant or (await db.get_participant(event_id, user_id) if db else None)
+
+        embed = discord.Embed(
+            title=f"🧾 最終確認 | {event.get('title', '未命名活動') if event else '活動'}",
+            description="請先確認所有答案。你可以直接用下拉選單選題，打開表單手動修改；內容正確後再按 Confirm。",
+            color=0x9B59B6,
+        )
+        if not event or not participant:
+            embed.description = "找不到面試資料。"
+            return embed
+
+        questions = event.get("interview_questions", []) or []
+        answers = ((participant.get("interview", {}) or {}).get("answers", {}) or {})
+
+        if not questions:
+            embed.add_field(name="題目", value="(無題目)", inline=False)
+            return embed
+
+        for idx, question in enumerate(questions, start=1):
+            qid = str(question.get("id") or "")
+            qtext = str(question.get("text") or "").strip() or f"題目 {idx}"
+            answer = str(answers.get(qid) or "（尚未填寫）").strip() or "（尚未填寫）"
+            embed.add_field(name=f"{idx}. {qtext}"[:256], value=answer[:1000], inline=False)
+
+        remain = self._remaining_interview_minutes(event)
+        if remain is not None:
+            embed.set_footer(text=f"面試剩餘時間：約 {remain} 分鐘")
+        return embed
+
+    async def build_confirm_submission_view(self, event_id, user_id, event=None, participant=None):
+        db = self.bot.get_cog("Database")
+        event = event or (await db.get_event(event_id) if db else None)
+        participant = participant or (await db.get_participant(event_id, user_id) if db else None)
+        options = self._build_submission_edit_options(event, participant)
+        return ConfirmSubmissionView(self.bot, event_id, user_id, options=options)
+
+    async def send_submission_review(self, event_id, user_id, user=None, message_to_edit=None, event=None, participant=None):
+        db = self.bot.get_cog("Database")
+        event = event or (await db.get_event(event_id) if db else None)
+        participant = participant or (await db.get_participant(event_id, user_id) if db else None)
+
+        embed = await self.build_submission_review_embed(event_id, user_id, event=event, participant=participant)
+        view = await self.build_confirm_submission_view(event_id, user_id, event=event, participant=participant)
+
+        if message_to_edit:
+            await message_to_edit.edit(content=None, embed=embed, view=view)
+            return message_to_edit
+
+        target_user = user
+        if not target_user:
+            target_user = self.bot.get_user(int(user_id))
+            if not target_user:
+                try:
+                    target_user = await self.bot.fetch_user(int(user_id))
+                except Exception:
+                    target_user = None
+        if not target_user:
+            return None
+
+        return await target_user.send(embed=embed, view=view)
+
+    async def confirm_submission_from_button(self, event_id, user_id, interaction: discord.Interaction, deferred=False):
+        async def _reply(text: str):
+            if deferred:
+                await interaction.followup.send(text, ephemeral=True)
+                return
+            try:
+                await interaction.response.send_message(text, ephemeral=True)
+            except discord.errors.InteractionResponded:
+                await interaction.followup.send(text, ephemeral=True)
+
         db = self.bot.get_cog("Database")
         event = await db.get_event(event_id) if db else None
-        if not event:
-            await interaction.followup.send("找不到活動，請稍後再試。", ephemeral=True)
+        participant = await db.get_participant(event_id, user_id) if db else None
+        if not event or not participant:
+            await _reply("找不到活動，請稍後再試。")
+            return
+
+        interview = (participant.get("interview", {}) or {})
+        if interview.get("completed") or participant.get("status") in {"READY", "FINISHED"}:
+            await _reply("你已完成確認送出。")
             return
 
         await db.update_participant_interview(
@@ -1398,7 +1621,7 @@ class Jio(commands.Cog):
         await self.maybe_trigger_adjudication(event_id)
         await self.update_dashboard(event_id)
         await self.log_event_state(event_id)
-        await interaction.followup.send("✅ 已確認送出。", ephemeral=True)
+        await _reply("✅ 已確認送出。")
 
     async def open_edit_question_selector(self, event_id, user_id, interaction: discord.Interaction):
         db = self.bot.get_cog("Database")
@@ -1412,63 +1635,55 @@ class Jio(commands.Cog):
         if interview.get("confirmed") or interview.get("completed"):
             await interaction.followup.send("你已確認送出，無法再修改。", ephemeral=True)
             return
-        edited_ids = set(interview.get("edited_question_ids", []) or [])
 
-        options = []
-        for idx, question in enumerate(event.get("interview_questions", []) or [], start=1):
-            qid = str(question.get("id") or "")
-            if not qid or qid in edited_ids:
-                continue
-            options.append(
-                discord.SelectOption(
-                    label=f"{idx}. {str(question.get('text') or '')[:90]}",
-                    value=qid,
-                    description="選擇後請直接回覆新答案",
-                )
-            )
-
+        options = self._build_submission_edit_options(event, participant)
         if not options:
-            await interaction.followup.send("你已用完可修改題目（每題最多 1 次）。", ephemeral=True)
+            await interaction.followup.send("目前沒有可修改的題目。", ephemeral=True)
             return
 
         view = ConfirmEditQuestionView(self.bot, event_id, user_id, options)
         await interaction.followup.send("請選擇要修改的題目。", view=view, ephemeral=True)
 
-    async def enter_edit_question_mode(self, event_id, user_id, question_id, interaction: discord.Interaction):
+    async def open_manual_edit_modal(self, event_id, user_id, question_id, interaction: discord.Interaction, source_view=None, source_message=None):
         db = self.bot.get_cog("Database")
         event = await db.get_event(event_id) if db else None
         participant = await db.get_participant(event_id, user_id) if db else None
         if not event or not participant:
-            await interaction.followup.send("找不到面試資料。", ephemeral=True)
+            await interaction.response.send_message("找不到面試資料。", ephemeral=True)
             return
 
         interview = participant.get("interview", {}) or {}
-        edited_ids = list(interview.get("edited_question_ids", []) or [])
-        if question_id in edited_ids:
-            await interaction.followup.send("這一題已修改過，無法再次修改。", ephemeral=True)
+        if interview.get("confirmed") or interview.get("completed"):
+            await interaction.response.send_message("你已確認送出，無法再修改。", ephemeral=True)
             return
-
-        edited_ids.append(question_id)
-        await db.update_participant_interview(
-            event_id,
-            user_id,
-            current_question_id=question_id,
-            interview_completed=False,
-            confirmed=False,
-            edited_question_ids=edited_ids,
-        )
-        await db.update_participant_status(event_id, user_id, "INTERVIEWING")
-        await db.set_participant_reply_status(event_id, user_id, "WAITING_FOR_REPLY")
 
         question_text = ""
         for question in event.get("interview_questions", []) or []:
-            if str(question.get("id")) == str(question_id):
+            if str(question.get("id") or "") == str(question_id):
                 question_text = str(question.get("text") or "")
                 break
 
-        remain = self._remaining_interview_minutes(event)
-        tip = f"\n⏳ 面試剩餘時間：約 {remain} 分鐘" if remain is not None else ""
-        await interaction.followup.send(f"請修改這一題答案：{question_text}{tip}", ephemeral=True)
+        if not question_text:
+            await interaction.response.send_message("找不到該題目，請重新選擇。", ephemeral=True)
+            return
+
+        current_answer = str((interview.get("answers", {}) or {}).get(question_id) or "")
+        modal = ManualAnswerEditModal(
+            self.bot,
+            event_id,
+            user_id,
+            question_id,
+            question_text,
+            current_answer,
+            source_view=source_view,
+            source_message=source_message,
+            title="手動修改答案",
+        )
+        await interaction.response.send_modal(modal)
+
+    async def enter_edit_question_mode(self, event_id, user_id, question_id, interaction: discord.Interaction):
+        # Keep backward compatibility for old call sites, but route to modal-based manual editing.
+        await self.open_manual_edit_modal(event_id, user_id, question_id, interaction)
 
     async def cancel_event_with_announcement(self, event_id, cancelled_by, reason="", source="HOST"):
         db = self.bot.get_cog("Database")
@@ -2615,6 +2830,10 @@ class Jio(commands.Cog):
             if participant and (interview.get("completed") or participant.get("status") in {"READY", "FINISHED"}):
                 detail = await self.describe_current_interview_state(event, message.author.id)
                 await message.author.send(f"✅ 你在此活動的面試已完成。\n{detail}")
+                return
+
+            if participant and str(interview.get("current_question_id") or "") == "confirm_submit":
+                await message.author.send("🧾 你目前在最終確認階段，請使用上一則確認卡片的下拉選單修改答案，完成後按 Confirm。")
                 return
             
             # Log User Msg
