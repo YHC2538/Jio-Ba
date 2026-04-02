@@ -14,7 +14,6 @@ load_dotenv()
 if not hasattr(discord, "Bot"):
     print("🛑 CRITICAL ERROR: Unsupported discord package detected (missing discord.Bot).")
     print("This project requires py-cord in the project virtual environment.")
-    print("Run with: D:/Jio-Ba/.venv/Scripts/python.exe D:/Jio-Ba/Wei-Jia-Ba/main.py")
     sys.exit(1)
 
 # Startup Environment Check

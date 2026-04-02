@@ -2,7 +2,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/YHC2538/Jio-Ba">
-    <img src="images/logo.png" alt="Logo" width="100" height="100">
+    <img src="images/logo.png" alt="Logo" width="150" height="150">
   </a>
 
   <h3 align="center">揪霸 Jio-Ba</h3>
@@ -36,7 +36,7 @@
 3. 將惡意或不配合回覆暫時停權並隔離到 ON_HOLD，交由主揪裁決。
 4. 最後用 Nash Social Welfare (NSW) 產生候選方案，讓主揪快速定案。
 
-## 📢 核心能力
+## 💎 核心能力
 
 - 活動建立與管理（標題、說明、截止時間、最低成團人數、自訂題目）。
 - 自動抽取與展示 4W1H seeds（What/Where/When/How，必要時含 Why）。
@@ -54,6 +54,41 @@
 4. 面試完成後，系統產生幕僚報告與候選方案給主揪。
 5. 主揪按下裁決方案，系統公告最終結果並結束流程。
 
+## 使用快照
+
+
+#### 發起活動
+
+<div align="center">
+  <img src="images/createEvent.png" alt="Logo" width="280" height="400">
+</div>
+
+#### 訪問中
+
+<div align="center">
+  <img src="images/interviewing.png" alt="Logo" width="800" height="400">
+</div>
+
+#### 惡意參與者給予警告以及停權
+
+<div align="center">
+  <img src="images/warning.png" alt="Logo" width="400" height="200">
+</div>
+
+
+<div align="center">
+  <img src="images/on_hold.png" alt="Logo" width="400" height="160">
+</div>
+
+
+#### 方案公佈
+
+<div align="center">
+  <img src="images/final_decision.png" alt="Logo" width="400" height="400">
+</div>
+
+
+
 ## 📜 目前可用指令
 
 - `/jio`
@@ -63,7 +98,18 @@
 
 ## ⚓ 架構與模組
 
-採用 LangChain 以及 LangGraph 構建 AI Agent 的工作流程
+<div align="center">
+  <a href="https://docs.langchain.com/oss/python/langchain/overview">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./images/langchain-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="./images/langchain-light.svg">
+      <img alt="LangChain Logo" src="./images/langchain-dark.svg" width="20%">
+    </picture>
+  </a>
+
+  採用 LangChain 以及 LangGraph 構建 AI Agent 的工作流程
+</div>
+
 
 - `main.py`
   Bot 啟動入口、環境檢查、載入 cogs。

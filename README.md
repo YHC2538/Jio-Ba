@@ -36,7 +36,7 @@ Jio-Ba is not just a bot that helps you ask questions. It is a **Discord activit
 3. Temporarily suspend malicious or uncooperative replies into ON_HOLD and let the host decide.
 4. Use Nash Social Welfare (NSW) at the end to generate candidate plans and let the host finalize one quickly.
 
-## 📢 Core Capabilities
+## 💎 Core Capabilities
 
 - Activity creation and management (title, description, deadlines, minimum participant count, custom questions).
 - Automatic extraction and display of 4W1H seeds (What/Where/When/How, and Why when needed).

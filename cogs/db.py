@@ -22,7 +22,7 @@ def _mask_mongo_uri(uri: str) -> str:
 class Database(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.mongo_uri = os.getenv("MONGO_URI", "mongodb+srv://dian_user:Ql2AWvIW4pZPR2G3@discordeat.d2zjvdv.mongodb.net/?appName=discordEat")
+        self.mongo_uri = os.getenv("MONGO_URI", "bruh")
         self.client = motor.motor_asyncio.AsyncIOMotorClient(
             self.mongo_uri,
             serverSelectionTimeoutMS=5000,
