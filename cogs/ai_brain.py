@@ -6,6 +6,35 @@ from discord.ext import commands
 from .graph_agent import create_graph
 
 
+def _message_content_to_text(content) -> str:
+    """Normalize LangChain message content that may be str/list/dict into plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, dict):
+        for key in ("text", "output_text", "content"):
+            value = content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                for key in ("text", "output_text", "content"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value.strip())
+                        break
+        return "\n".join(parts).strip()
+    return str(content).strip()
+
+
 # --- Monkey Patch for Google GenAI Error Handling ---
 # Fixes AttributeError when API returns a string error instead of dict
 import google.genai.errors
@@ -288,7 +317,7 @@ class AIBrain(commands.Cog):
                     # We look for the last AIMessage
                     for msg in reversed(messages):
                         if msg.type == "ai":
-                            content = msg.content.strip()
+                            content = _message_content_to_text(getattr(msg, "content", ""))
                             if content:
                                 print(f"[DEBUG LOG] Graph response text: {content}")
                                 if target_uid:

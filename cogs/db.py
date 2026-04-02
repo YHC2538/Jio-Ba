@@ -1,11 +1,13 @@
 import os
 import datetime
 import json
+import re
 from urllib.parse import urlparse
 
 import motor.motor_asyncio
 from discord.ext import commands
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
 
 
 def _mask_mongo_uri(uri: str) -> str:
@@ -18,6 +20,79 @@ def _mask_mongo_uri(uri: str) -> str:
         return f"{scheme}://***@{host}"
     except Exception:
         return "<invalid-uri>"
+
+
+def _normalize_model_content(raw_content) -> str:
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content.strip()
+    if isinstance(raw_content, dict):
+        for key in ("text", "output_text", "content"):
+            value = raw_content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if isinstance(raw_content, list):
+        parts = []
+        for item in raw_content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                for key in ("text", "output_text", "content"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value.strip())
+                        break
+        return "\n".join(parts).strip()
+    return str(raw_content).strip()
+
+
+def _safe_json_parse(raw_content):
+    text = _normalize_model_content(raw_content)
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+
+    if not text:
+        return {}
+
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return {}
+        return {}
+
+
+def _is_system_instruction_not_supported(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return (
+        "developer instruction" in msg
+        or "system instruction" in msg
+        or ("system" in msg and "not enabled" in msg)
+    )
+
+
+async def _ainvoke_with_system_fallback(llm, system_prompt: str, user_prompt: str):
+    msgs = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    try:
+        return await llm.ainvoke(msgs)
+    except Exception as exc:
+        if not _is_system_instruction_not_supported(exc):
+            raise
+        fallback = HumanMessage(content=f"{system_prompt}\n\n---\n{user_prompt}")
+        return await llm.ainvoke([fallback])
 
 class Database(commands.Cog):
     def __init__(self, bot):
@@ -108,13 +183,8 @@ class Database(commands.Cog):
                         temperature=0.2,
                     )
 
-                    prompt = f"""
+                    system_prompt = """
 你是活動訪綱設計助手。請依據活動資訊，為尚未決定的主題生成提問句。
-
-活動標題: {str(title or '').strip()}
-活動描述: {str(description or '').strip()}
-已預設 seeds: {json.dumps({k: seeds.get(k) for k in ['what','where','when','how']}, ensure_ascii=False)}
-需提問主題: {asked_topics}
 
 請輸出 JSON，key 只能是 what/where/when/how，value 是一句繁體中文問題。
 規則：
@@ -122,18 +192,18 @@ class Database(commands.Cog):
 2) 不要產生 why 題。
 3) 只輸出 JSON。
 """
-                    resp = await llm.ainvoke(prompt)
-                    text = str(getattr(resp, "content", "") or "").strip()
-                    if "```json" in text:
-                        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-                    elif "```" in text:
-                        text = text.split("```", 1)[1].split("```", 1)[0].strip()
-
-                    parsed = {}
-                    try:
-                        parsed = json.loads(text)
-                    except Exception:
-                        parsed = {}
+                    user_prompt = (
+                        f"活動標題: {str(title or '').strip()}\n"
+                        f"活動描述: {str(description or '').strip()}\n"
+                        f"已預設 seeds: {json.dumps({k: seeds.get(k) for k in ['what','where','when','how']}, ensure_ascii=False)}\n"
+                        f"需提問主題: {asked_topics}"
+                    )
+                    resp = await _ainvoke_with_system_fallback(
+                        llm,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    )
+                    parsed = _safe_json_parse(getattr(resp, "content", ""))
 
                     for topic in asked_topics:
                         candidate = str((parsed or {}).get(topic) or "").strip()

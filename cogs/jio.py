@@ -8,6 +8,7 @@ import datetime
 import re
 from pymongo.errors import PyMongoError
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from bson import ObjectId
 from cogs.matching.nsw_calculator import CandidatePlan, UserProfile, rank_candidates
@@ -63,8 +64,65 @@ def parse_activity_brief_and_seeds(text: str):
     return " ".join(brief_parts).strip(), seeds
 
 
+def _normalize_model_content(raw_content) -> str:
+    """Normalize provider-specific content blocks into a plain text payload."""
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content.strip()
+    if isinstance(raw_content, dict):
+        for key in ("text", "output_text", "content"):
+            value = raw_content.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if isinstance(raw_content, list):
+        parts = []
+        for item in raw_content:
+            if isinstance(item, str):
+                if item.strip():
+                    parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                for key in ("text", "output_text", "content"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value.strip())
+                        break
+        return "\n".join(parts).strip()
+    return str(raw_content).strip()
+
+
+def _is_system_instruction_not_supported(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return (
+        "developer instruction" in msg
+        or "system instruction" in msg
+        or ("system" in msg and "not enabled" in msg)
+    )
+
+
+async def _ainvoke_with_system_fallback(llm, system_prompt: str, user_prompt: str, config=None):
+    msgs = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    try:
+        if config is not None:
+            return await llm.ainvoke(msgs, config=config)
+        return await llm.ainvoke(msgs)
+    except Exception as exc:
+        if not _is_system_instruction_not_supported(exc):
+            raise
+
+        fallback = HumanMessage(content=f"{system_prompt}\n\n---\n{user_prompt}")
+        if config is not None:
+            return await llm.ainvoke([fallback], config=config)
+        return await llm.ainvoke([fallback])
+
+
 def _safe_json_parse(raw_text: str):
-    text = str(raw_text or "").strip()
+    text = _normalize_model_content(raw_text)
     if "```json" in text:
         text = text.split("```json", 1)[1].split("```", 1)[0].strip()
     elif "```" in text:
@@ -76,6 +134,13 @@ def _safe_json_parse(raw_text: str):
     try:
         return json.loads(text)
     except Exception:
+        # Recover when model wraps JSON with extra prose.
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                return {}
         return {}
 
 
@@ -97,11 +162,9 @@ async def parse_activity_brief_and_seeds_with_llm(text: str):
             temperature=0.1,
         )
 
-        prompt = f"""
+        system_prompt = """
 你是活動資訊抽取器。請從使用者自由輸入內容中，抽取 4W1H 與活動簡述。
-輸入可能是自然語句，不一定使用 what=... 這種格式。
-
-使用者輸入：{raw}
+    輸入可能是自然語句，不一定使用 what=... 這種格式。
 
 只輸出 JSON：
 {{
@@ -118,12 +181,18 @@ async def parse_activity_brief_and_seeds_with_llm(text: str):
 2) brief 應是 1~2 句精簡摘要。
 3) 不要輸出多餘文字。
 """
+        user_prompt = f"使用者輸入：{raw}"
         trace_config = {
             "run_name": "parse_activity_seeds", # 取一個一看就懂的名字
             "tags": ["jio-ba", "discord", "event_creation"], # 貼上標籤方便過濾
         }
 
-        resp = await llm.ainvoke(prompt, config=trace_config)
+        resp = await _ainvoke_with_system_fallback(
+            llm,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            config=trace_config,
+        )
         parsed = _safe_json_parse(getattr(resp, "content", ""))
 
         llm_seeds = {}
