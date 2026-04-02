@@ -2,18 +2,27 @@
 <br />
 <div align="center">
   <a href="https://github.com/YHC2538/Jio-Ba">
-    <img src="images/logo.png" alt="Logo" width="100" height="100">
+    <img src="images/logo.png" alt="Logo" width="150" height="150">
   </a>
 
   <h3 align="center">Jio-Ba</h3>
 
   <p align="center">
-    Turn "group planning is painful" into "one sentence and the event is live".
+    Turn "group planning is painful" into a Discord AI assistant that can launch the event in one sentence.
     <br />
     <a href="https://github.com/YHC2538/Jio-Ba"><strong>View the project »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/YHC2538/Jio-Ba/issues">Report a bug</a>
+    <!-- INSERT SHEILDS IO -->
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.10%20%7C%203.11-3776AB?logo=python&logoColor=white" />
+    <img alt="Discord" src="https://img.shields.io/badge/Discord-Bot-5865F2?logo=discord&logoColor=white" />
+    <img alt="MongoDB" src="https://img.shields.io/badge/Database-MongoDB-47A248?logo=mongodb&logoColor=white" />
+    <img alt="LangChain" src="https://img.shields.io/badge/AI-LangChain-1C3C3C" />
+    <img alt="LangGraph" src="https://img.shields.io/badge/Workflow-LangGraph-121212" />
+    <img alt="uv" src="https://img.shields.io/badge/Package%20Manager-uv-DE5FE9" />
+    <br />
+    <br />
+    <a href="https://github.com/YHC2538/Jio-Ba/issues">Report an issue</a>
     &middot;
     <a href="https://github.com/YHC2538/Jio-Ba/issues">Request a feature</a>
   </p>
@@ -23,26 +32,26 @@
 
 ## 🤖 Why Jio-Ba?
 
-You’ve probably run into this situation before:
+You have probably been in this situation before:
 
-- Everyone says "anything works", and the group still never converges.
-- Messages get buried, and the host has to manually summarize everyone’s needs.
-- Conflicting preferences around time and location leave someone stuck compromising.
+- A group of people keeps saying "anything works", but nothing ever gets decided.
+- Messages get buried, and the host has to manually sort out everyone’s needs.
+- Time and location preferences conflict, so someone always ends up compromising.
 
-Jio-Ba is not just a bot that helps you ask questions. It is a **Discord activity coordination console**:
+Jio-Ba is not just a bot that asks questions. It is a **Discord-based activity coordination console**:
 
-1. Turn natural-language requests into structured 4W1H.
-2. Use a DM interview flow to narrow down each participant’s real preferences.
-3. Temporarily suspend malicious or uncooperative replies into ON_HOLD and let the host decide.
-4. Use Nash Social Welfare (NSW) at the end to generate candidate plans and let the host finalize one quickly.
+1. Convert natural language into structured 4W1H.
+2. Narrow each participant’s real preferences through a DM interview flow.
+3. Temporarily suspend malicious or uncooperative replies into ON_HOLD and let the host make the call.
+4. Use Nash Social Welfare (NSW) to generate candidate plans and let the host finalize quickly.
 
 ## 💎 Core Capabilities
 
-- Activity creation and management (title, description, deadlines, minimum participant count, custom questions).
+- Activity creation and management (title, description, deadline, minimum participant count, custom questions).
 - Automatic extraction and display of 4W1H seeds (What/Where/When/How, and Why when needed).
 - AI-generated interview questions that fill in missing information instead of using a fixed questionnaire.
-- DM interview flow (question-by-question, follow-up, and confirmation before submission).
-- Handling malicious participants with warnings, ON_HOLD, and host verdicts CONTINUE/KICK.
+- DM interview flow (one question at a time, follow-up questions, and confirmation before submission).
+- Protection against malicious participants with warnings, ON_HOLD, and host verdicts CONTINUE/KICK.
 - Real-time channel dashboard updates (Joined/Interviewing/ON_HOLD/Ready/Kicked).
 - Final-plan announcement and Discord Scheduled Event integration.
 
@@ -50,20 +59,68 @@ Jio-Ba is not just a bot that helps you ask questions. It is a **Discord activit
 
 1. Enter `/jio` in a server.
 2. Fill in the activity information, then the bot posts the activity card and Join button.
-3. After participants join, signup closes or the host ends it early, and the DM interview starts.
-4. Once interviews finish, the system generates a staff report and candidate plans for the host.
+3. After participants join, signup closes or the host ends it early, and the DM interview begins.
+4. After the interview finishes, the system generates a staff report and candidate plans for the host.
 5. The host chooses the final plan, and the bot announces the result and closes the flow.
+
+## Snaphots
+
+#### Start an activity
+
+<div align="center">
+  <img src="images/createEvent.png" alt="Create activity screenshot" width="280" height="400">
+</div>
+
+#### Interview in progress
+
+<div align="center">
+  <img src="images/interviewing.png" alt="Interviewing screenshot" width="800" height="400">
+</div>
+
+#### Warnings and suspension for malicious participants
+
+<div align="center">
+  <img src="images/warning.png" alt="Warning screenshot" width="400" height="200">
+</div>
+
+<div align="center">
+  <img src="images/on_hold.png" alt="ON_HOLD screenshot" width="400" height="160">
+</div>
+
+#### Final plan announcement
+
+<div align="center">
+  <img src="images/final_decision.png" alt="Final decision screenshot" width="400" height="400">
+</div>
 
 ## 📜 Available Commands
 
 - `/jio`
   Start an activity (supports parameters such as title and time limits).
 - `/verdict`
-  Open the ON_HOLD member adjudication UI.
+  Open the ON_HOLD adjudication interface.
 
 ## ⚓ Architecture and Modules
 
-Built with LangChain and LangGraph to structure the AI agent workflow.
+<div align="center">
+  <a href="https://docs.langchain.com/oss/python/langchain/overview">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./images/langchain-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="./images/langchain-light.svg">
+      <img alt="LangChain Logo" src="./images/langchain-dark.svg" width="20%">
+    </picture>
+  </a>
+  <a href="https://www.langchain.com/langgraph">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./images/langgraph-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="./images/langgraph-light.svg">
+      <img alt="LangGraph Logo" src=".github/images/langgraph-dark.svg" width="20%">
+    </picture>
+  </a>
+
+  Built with LangChain and LangGraph to structure the AI agent workflow
+</div>
+
 
 - `main.py`
   Bot entry point, environment checks, and cog loading.

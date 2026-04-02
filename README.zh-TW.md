@@ -13,6 +13,15 @@
     <a href="https://github.com/YHC2538/Jio-Ba"><strong>查看專案 »</strong></a>
     <br />
     <br />
+    <!-- INSERT SHEILDS IO -->
+    <img alt="Python" src="https://img.shields.io/badge/Python-3.10%20%7C%203.11-3776AB?logo=python&logoColor=white" />
+    <img alt="Discord" src="https://img.shields.io/badge/Discord-Bot-5865F2?logo=discord&logoColor=white" />
+    <img alt="MongoDB" src="https://img.shields.io/badge/Database-MongoDB-47A248?logo=mongodb&logoColor=white" />
+    <img alt="LangChain" src="https://img.shields.io/badge/AI-LangChain-1C3C3C" />
+    <img alt="LangGraph" src="https://img.shields.io/badge/Workflow-LangGraph-121212" />
+    <img alt="uv" src="https://img.shields.io/badge/Package%20Manager-uv-DE5FE9" />
+    <br />
+    <br />
     <a href="https://github.com/YHC2538/Jio-Ba/issues">回報問題</a>
     &middot;
     <a href="https://github.com/YHC2538/Jio-Ba/issues">提出需求</a>
@@ -104,6 +113,14 @@
       <source media="(prefers-color-scheme: dark)" srcset="./images/langchain-dark.svg">
       <source media="(prefers-color-scheme: light)" srcset="./images/langchain-light.svg">
       <img alt="LangChain Logo" src="./images/langchain-dark.svg" width="20%">
+    </picture>
+  </a>
+
+  <a href="https://www.langchain.com/langgraph">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="./images/langgraph-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="./images/langgraph-light.svg">
+      <img alt="LangGraph Logo" src=".github/images/langgraph-dark.svg" width="20%">
     </picture>
   </a>
 
