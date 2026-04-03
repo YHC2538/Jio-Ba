@@ -14,54 +14,52 @@ from bson import ObjectId
 from cogs.matching.nsw_calculator import CandidatePlan, UserProfile, rank_candidates
 
 
-def parse_activity_brief_and_seeds(text: str):
-    raw = str(text or "").strip()
-    if not raw:
-        return "", {}
+CORE_TOPICS = ["what", "where", "when", "how"]
 
-    alias = {
-        "what": "what",
-        "where": "where",
-        "when": "when",
-        "why": "why",
-        "how": "how",
-        "做什麼": "what",
-        "地點": "where",
-        "時間": "when",
-        "原因": "why",
-        "方式": "how",
-    }
-    brief_keys = {"brief", "description", "desc", "info", "資訊", "說明"}
 
-    seeds = {}
-    brief_parts = []
+def _clean_seed_dict(seed_dict) -> dict:
+    cleaned = {}
+    for key in CORE_TOPICS:
+        value = str((seed_dict or {}).get(key) or "").strip()
+        if value:
+            cleaned[key] = value
+    return cleaned
 
-    normalized = raw.replace("\n", ";")
-    for chunk in normalized.split(";"):
-        piece = chunk.strip()
-        if not piece:
+
+def _build_interview_questions_from_llm(seed_dict, generated_questions=None, custom_questions=None) -> list:
+    generated_questions = generated_questions or {}
+    custom_questions = custom_questions or []
+
+    missing_topics = [topic for topic in CORE_TOPICS if not str((seed_dict or {}).get(topic) or "").strip()]
+    questions = []
+
+    for topic in missing_topics:
+        candidate = str((generated_questions or {}).get(topic) or "").strip()
+        if not candidate:
+            raise ValueError(f"LLM response missing generated question for topic: {topic}")
+        questions.append(
+            {
+                "id": f"core_{topic}",
+                "topic": topic,
+                "text": candidate,
+                "required": True,
+            }
+        )
+
+    for idx, text in enumerate(custom_questions[:1], start=1):
+        cleaned = str(text or "").strip()
+        if not cleaned:
             continue
+        questions.append(
+            {
+                "id": f"custom_{idx}",
+                "topic": "custom",
+                "text": cleaned,
+                "required": True,
+            }
+        )
 
-        sep = "=" if "=" in piece else ("：" if "：" in piece else None)
-        if not sep:
-            brief_parts.append(piece)
-            continue
-
-        key, value = piece.split(sep, 1)
-        cleaned_key = key.strip().lower()
-        cleaned_value = value.strip()
-        if not cleaned_value:
-            continue
-
-        mapped = alias.get(cleaned_key)
-        if mapped:
-            seeds[mapped] = cleaned_value
-        elif cleaned_key in brief_keys:
-            brief_parts.append(cleaned_value)
-        else:
-            brief_parts.append(piece)
-
-    return " ".join(brief_parts).strip(), seeds
+    return questions[:5]
 
 
 def _normalize_model_content(raw_content) -> str:
@@ -144,46 +142,94 @@ def _safe_json_parse(raw_text: str):
         return {}
 
 
-async def parse_activity_brief_and_seeds_with_llm(text: str):
+def _parse_llm_activity_payload(parsed_payload: dict):
+    if not isinstance(parsed_payload, dict):
+        raise ValueError("LLM response is not a JSON object")
+
+    if "brief" not in parsed_payload:
+        raise ValueError("LLM response missing brief")
+
+    seeds_raw = parsed_payload.get("seeds")
+    generated_raw = parsed_payload.get("generated_questions")
+
+    if not isinstance(seeds_raw, dict):
+        raise ValueError("LLM response missing seeds object")
+    if not isinstance(generated_raw, dict):
+        raise ValueError("LLM response missing generated_questions object")
+
+    for key in CORE_TOPICS:
+        if key not in seeds_raw:
+            raise ValueError(f"LLM response missing seeds.{key}")
+        if key not in generated_raw:
+            raise ValueError(f"LLM response missing generated_questions.{key}")
+
+    brief = str(parsed_payload.get("brief") or "").strip()
+    seeds = _clean_seed_dict(seeds_raw)
+
+    generated = {}
+    for key in CORE_TOPICS:
+        generated[key] = str(generated_raw.get(key) or "").strip()
+
+    return brief, seeds, generated
+
+
+async def parse_activity_and_questions_with_llm(text: str, title: str = "", custom_questions=None):
     raw = str(text or "").strip()
-    fallback_brief, fallback_seeds = parse_activity_brief_and_seeds(raw)
-    if not raw:
-        return "", {}
+    custom_questions = custom_questions or []
+    if not raw and not str(title or "").strip():
+        raise ValueError("Activity input is empty")
 
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        merged_brief = fallback_brief or raw
-        return merged_brief, fallback_seeds
+        print("[DEBUG][LLM] GOOGLE_API_KEY is missing. Strict LLM mode aborts activity parsing.")
+        raise RuntimeError("LLM API is not available")
 
     try:
         llm = ChatGoogleGenerativeAI(
             model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"),
             google_api_key=api_key,
-            temperature=0.1,
+            temperature=0.15,
         )
 
         system_prompt = """
-你是活動資訊抽取器。請從使用者自由輸入內容中，抽取 4W1H 與活動簡述。
-    輸入可能是自然語句，不一定使用 what=... 這種格式。
+你是活動資料抽取與訪談題目設計助手。
+請對使用者輸入做兩件事：
+1) 抽取活動摘要與 seeds（what/where/when/how）。
+2) 只針對尚未確定的 topic 產生訪談題目。
 
 只輸出 JSON：
 {{
   "brief": "",
-  "what": "",
-  "where": "",
-  "when": "",
-  "why": "",
-  "how": ""
+  "seeds": {{
+    "what": "",
+    "where": "",
+    "when": "",
+    "how": ""
+  }},
+  "generated_questions": {{
+    "what": "",
+    "where": "",
+    "when": "",
+    "how": ""
+  }}
 }}
 
 規則：
 1) 若某欄無法判斷，留空字串。
 2) brief 應是 1~2 句精簡摘要。
-3) 不要輸出多餘文字。
+3) generated_questions 只能填入「缺失 topic」的題目；已經有 seeds 的 topic 保持空字串。
+4) 題目需為繁體中文、可直接回答、具體，不要空泛。
+5) 禁止輸出 why 欄位與 why 題。
+6) 如果使用者在活動描述中，可能無明確決定 seeds，然而針對 seeds 或問題設計有條件限制（例如「只能在台北」、「只能晚上」、「時間必須精確到幾時幾分」），請務必根據條件限制來設計訪談題目。(但仍然必須按照JSON格式輸出，不要在 JSON 以外的地方說明)。
+7) 不要輸出多餘文字。
 """
-        user_prompt = f"使用者輸入：{raw}"
+        user_prompt = (
+            f"活動標題: {str(title or '').strip()}\n"
+            f"User 輸入活動描述: {raw}\n"
+            f"自訂問題（最多1題）: {json.dumps([str(q).strip() for q in custom_questions[:1] if str(q).strip()], ensure_ascii=False)}"
+        )
         trace_config = {
-            "run_name": "parse_activity_seeds", # 取一個一看就懂的名字
+            "run_name": "parse_activity_and_questions",
             "tags": ["jio-ba", "discord", "event_creation"], # 貼上標籤方便過濾
         }
 
@@ -195,18 +241,17 @@ async def parse_activity_brief_and_seeds_with_llm(text: str):
         )
         parsed = _safe_json_parse(getattr(resp, "content", ""))
 
-        llm_seeds = {}
-        for key in ["what", "where", "when", "why", "how"]:
-            value = str(parsed.get(key) or "").strip()
-            if value:
-                llm_seeds[key] = value
-
-        merged_seeds = {**fallback_seeds, **llm_seeds}
-        brief = str(parsed.get("brief") or "").strip() or fallback_brief or raw
-        return brief, merged_seeds
-    except Exception:
-        merged_brief = fallback_brief or raw
-        return merged_brief, fallback_seeds
+        brief, seeds, generated_question_map = _parse_llm_activity_payload(parsed)
+        interview_questions = _build_interview_questions_from_llm(
+            seeds,
+            generated_questions=generated_question_map,
+            custom_questions=custom_questions,
+        )
+        final_brief = brief or raw
+        return final_brief, seeds, interview_questions
+    except Exception as parse_err:
+        print(f"[DEBUG][LLM] parse_activity_and_questions_with_llm failed: {parse_err}")
+        raise
 
 
 def format_activity_seeds(seeds: dict) -> str:
@@ -215,10 +260,9 @@ def format_activity_seeds(seeds: dict) -> str:
         "what": "What",
         "where": "Where",
         "when": "When",
-        "why": "Why",
         "how": "How",
     }
-    for key in ["what", "where", "when", "why", "how"]:
+    for key in CORE_TOPICS:
         value = str((seeds or {}).get(key) or "").strip()
         if value:
             items.append(f"{labels[key]}: {value}")
@@ -263,8 +307,8 @@ class JioCreationModal(discord.ui.Modal):
         ))
         
         self.add_item(build_optional_input_text(
-            label="活動資訊 / 4W1H seeds",
-            placeholder="請自由描述活動，建議可提到 what/where/when/why/how 關鍵資訊",
+            label="活動資訊 / 4W seeds",
+            placeholder="請自由描述活動，建議可提到 what/where/when/how 關鍵資訊",
             style=discord.InputTextStyle.long,
             min_length=0,
         ))
@@ -358,7 +402,21 @@ class JioCreationModal(discord.ui.Modal):
 
         spinner_task = asyncio.create_task(_spinner())
 
-        parsed_brief, activity_seeds = await parse_activity_brief_and_seeds_with_llm(description)
+        try:
+            parsed_brief, activity_seeds, prebuilt_questions = await parse_activity_and_questions_with_llm(
+                description,
+                title=title,
+                custom_questions=[],
+            )
+        except Exception as llm_err:
+            print(f"[DEBUG][LLM] Activity creation aborted: {llm_err}")
+            spinner_alive = False
+            spinner_task.cancel()
+            await interaction.followup.send(
+                "❌ 活動建立失敗：目前無法使用 LLM 解析活動資訊，請稍後再試。",
+                ephemeral=True,
+            )
+            return
 
         # Prepare description
         final_description = parsed_brief if parsed_brief else "（由參與者訪談共同完善）"
@@ -387,6 +445,7 @@ class JioCreationModal(discord.ui.Modal):
                 min_participants=min_participants if min_participants is not None else self.default_min_participants,
                 activity_seeds=activity_seeds,
                 custom_questions=custom_questions,
+                prebuilt_questions=prebuilt_questions,
             )
         except PyMongoError as exc:
             print(f"[JioCreationModal] MongoDB error while creating event: {exc}")
@@ -417,7 +476,7 @@ class JioCreationModal(discord.ui.Modal):
 
         seed_text = format_activity_seeds(activity_seeds)
         if seed_text:
-            embed_desc += f"\n\n**4W1H Seeds**\n{seed_text}"
+            embed_desc += f"\n\n**4W Seeds**\n{seed_text}"
 
         effective_min = min_participants if min_participants is not None else self.default_min_participants
         if effective_min:
@@ -515,6 +574,8 @@ class JioEditModal(discord.ui.Modal):
         signup_input = self.children[2].value
         interview_input = self.children[3].value
         custom_input = self.children[4].value
+        custom_question = str(custom_input or "").strip()
+        host_custom_questions = [custom_question] if custom_question else []
         
         db = self.bot.get_cog("Database")
         event = await db.get_event(self.event_id)
@@ -522,33 +583,39 @@ class JioEditModal(discord.ui.Modal):
         update_data = {
             "title": new_title,
             "description": new_desc if new_desc else "（由大家討論決定）",
+            "host_custom_questions": host_custom_questions,
         }
 
         title_changed = bool(event) and str(event.get("title") or "").strip() != str(new_title or "").strip()
         desc_changed = bool(event) and str(event.get("description") or "").strip() != str(update_data["description"] or "").strip()
+        existing_custom = (event.get("host_custom_questions", []) if event else []) or []
+        existing_custom_first = str(existing_custom[0] if existing_custom else "").strip()
+        custom_changed = existing_custom_first != (host_custom_questions[0] if host_custom_questions else "")
 
-        if event and (title_changed or desc_changed):
-            existing_seeds = event.get("activity_seeds", {}) or {}
+        should_regenerate = bool(event) and (title_changed or desc_changed or custom_changed)
+        unified_questions = None
+
+        if should_regenerate:
             seed_input = f"標題: {new_title}\n說明: {update_data['description']}"
-            parsed_brief, parsed_seeds = await parse_activity_brief_and_seeds_with_llm(seed_input)
+            try:
+                parsed_brief, parsed_seeds, unified_questions = await parse_activity_and_questions_with_llm(
+                    seed_input,
+                    title=new_title,
+                    custom_questions=host_custom_questions,
+                )
+            except Exception as llm_err:
+                print(f"[DEBUG][LLM] Activity edit aborted: {llm_err}")
+                await _reply("❌ 設定更新失敗：目前無法使用 LLM 解析活動資訊，請稍後再試。")
+                return
 
-            merged_seeds = {
-                "what": str((existing_seeds.get("what") or parsed_seeds.get("what") or "")).strip() or None,
-                "where": str((existing_seeds.get("where") or parsed_seeds.get("where") or "")).strip() or None,
-                "when": str((existing_seeds.get("when") or parsed_seeds.get("when") or "")).strip() or None,
-                "how": str((existing_seeds.get("how") or parsed_seeds.get("how") or "")).strip() or None,
-                "why": str((existing_seeds.get("why") or parsed_seeds.get("why") or "")).strip() or None,
+            update_data["activity_seeds"] = {
+                "what": str((parsed_seeds or {}).get("what") or "").strip() or None,
+                "where": str((parsed_seeds or {}).get("where") or "").strip() or None,
+                "when": str((parsed_seeds or {}).get("when") or "").strip() or None,
+                "how": str((parsed_seeds or {}).get("how") or "").strip() or None,
             }
 
-            # 新資訊優先覆蓋舊 seeds，讓「需提問主題」能跟著更新
-            for key in ["what", "where", "when", "how", "why"]:
-                candidate = str((parsed_seeds or {}).get(key) or "").strip()
-                if candidate:
-                    merged_seeds[key] = candidate
-
-            update_data["activity_seeds"] = merged_seeds
-
-            if str(new_desc or "").strip() == "" and str(parsed_brief or "").strip():
+            if desc_changed and str(new_desc or "").strip() == "" and str(parsed_brief or "").strip():
                 update_data["description"] = str(parsed_brief).strip()
         
         if str(signup_input or "").strip():
@@ -566,18 +633,9 @@ class JioEditModal(discord.ui.Modal):
             except ValueError:
                 await _reply("❌ 面試截止時間格式錯誤，僅已更新其他設定。")
 
-        custom_question = str(custom_input or "").strip()
-        update_data["host_custom_questions"] = [custom_question] if custom_question else []
-
         if event and event.get("active", True):
-            seeds = update_data.get("activity_seeds") or event.get("activity_seeds", {}) or {}
-            rebuilt_questions = await db._build_interview_questions(
-                title=new_title,
-                description=update_data["description"],
-                seeds=seeds,
-                custom_questions=update_data["host_custom_questions"],
-            )
-            update_data["interview_questions"] = rebuilt_questions
+            if should_regenerate:
+                update_data["interview_questions"] = unified_questions
         
         await db.events.update_one({"_id": self.event_id}, {"$set": update_data})
 
@@ -2025,7 +2083,22 @@ class Jio(commands.Cog):
         await db.set_user_active_event(user_id, str(selected_event["_id"]))
         return selected_event
 
-    def build_nsw_candidates(self, participants):
+    def _merge_answers_with_event_seeds(self, participant, event_seeds):
+        answers = dict((participant.get("interview", {}) or {}).get("answers", {}) or {})
+        seeds = event_seeds or {}
+
+        for topic in CORE_TOPICS:
+            answer_key = f"core_{topic}"
+            if str(answers.get(answer_key) or "").strip():
+                continue
+
+            seed_value = str(seeds.get(topic) or "").strip()
+            if seed_value:
+                answers[answer_key] = seed_value
+
+        return answers
+
+    def build_nsw_candidates(self, participants, event_seeds=None):
         users = []
         what_options = set()
         where_options = set()
@@ -2036,7 +2109,7 @@ class Jio(commands.Cog):
             if participant.get("status") in ["KICKED", "DECLINED", "FINISHED"]:
                 continue
 
-            preferences = (participant.get("interview", {}) or {}).get("answers", {}) or {}
+            preferences = self._merge_answers_with_event_seeds(participant, event_seeds)
             weights = participant.get("weights", {}) or {}
             users.append(
                 UserProfile(
@@ -2117,7 +2190,8 @@ class Jio(commands.Cog):
         if not event:
             return
 
-        candidates = self.build_nsw_candidates(event.get("participants", []))
+        event_seeds = event.get("activity_seeds", {}) or {}
+        candidates = self.build_nsw_candidates(event.get("participants", []), event_seeds=event_seeds)
         if not candidates:
             return
 
@@ -2160,7 +2234,7 @@ class Jio(commands.Cog):
                     user_obj = None
             name = user_obj.display_name if user_obj else f"User {uid}"
             status = participant.get("status", "UNKNOWN")
-            answers = (participant.get("interview", {}) or {}).get("answers", {}) or {}
+            answers = self._merge_answers_with_event_seeds(participant, event_seeds)
             notes = participant.get("notes", {}) or {}
 
             report_lines.append(f"👤 {name} ({status})")
@@ -2170,6 +2244,12 @@ class Jio(commands.Cog):
                 avalue = str(answers.get(qid) or "(未填)")
                 report_lines.append(f"{idx}. {qtext}")
                 report_lines.append(f"   ↳ {avalue}")
+
+            report_lines.append("   4W（含活動已決定 seeds）:")
+            report_lines.append(f"   - What: {str(answers.get('core_what') or '活動內容待定')}")
+            report_lines.append(f"   - Where: {str(answers.get('core_where') or '地點待定')}")
+            report_lines.append(f"   - When: {str(answers.get('core_when') or '時間待定')}")
+            report_lines.append(f"   - How: {str(answers.get('core_how') or '流程待定')}")
 
             public_notes = notes.get("public", []) or []
             if public_notes:
@@ -2614,7 +2694,7 @@ class Jio(commands.Cog):
 
         seed_text = format_activity_seeds(event.get("activity_seeds", {}))
         if seed_text:
-            desc_text += f"\n\n**4W1H Seeds**\n{seed_text}"
+            desc_text += f"\n\n**4W Seeds**\n{seed_text}"
 
         if event.get("min_participants"):
             desc_text += f"\n\n👥 **最低成團人數**: {int(event.get('min_participants'))}"

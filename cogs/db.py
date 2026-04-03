@@ -1,13 +1,9 @@
 import os
 import datetime
-import json
-import re
 from urllib.parse import urlparse
 
 import motor.motor_asyncio
 from discord.ext import commands
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
 
 
 def _mask_mongo_uri(uri: str) -> str:
@@ -20,79 +16,6 @@ def _mask_mongo_uri(uri: str) -> str:
         return f"{scheme}://***@{host}"
     except Exception:
         return "<invalid-uri>"
-
-
-def _normalize_model_content(raw_content) -> str:
-    if raw_content is None:
-        return ""
-    if isinstance(raw_content, str):
-        return raw_content.strip()
-    if isinstance(raw_content, dict):
-        for key in ("text", "output_text", "content"):
-            value = raw_content.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-    if isinstance(raw_content, list):
-        parts = []
-        for item in raw_content:
-            if isinstance(item, str):
-                if item.strip():
-                    parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                for key in ("text", "output_text", "content"):
-                    value = item.get(key)
-                    if isinstance(value, str) and value.strip():
-                        parts.append(value.strip())
-                        break
-        return "\n".join(parts).strip()
-    return str(raw_content).strip()
-
-
-def _safe_json_parse(raw_content):
-    text = _normalize_model_content(raw_content)
-    if "```json" in text:
-        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in text:
-        text = text.split("```", 1)[1].split("```", 1)[0].strip()
-
-    if not text:
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except Exception:
-                return {}
-        return {}
-
-
-def _is_system_instruction_not_supported(exc: Exception) -> bool:
-    msg = str(exc or "").lower()
-    return (
-        "developer instruction" in msg
-        or "system instruction" in msg
-        or ("system" in msg and "not enabled" in msg)
-    )
-
-
-async def _ainvoke_with_system_fallback(llm, system_prompt: str, user_prompt: str):
-    msgs = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_prompt),
-    ]
-    try:
-        return await llm.ainvoke(msgs)
-    except Exception as exc:
-        if not _is_system_instruction_not_supported(exc):
-            raise
-        fallback = HumanMessage(content=f"{system_prompt}\n\n---\n{user_prompt}")
-        return await llm.ainvoke([fallback])
 
 class Database(commands.Cog):
     def __init__(self, bot):
@@ -159,86 +82,6 @@ class Database(commands.Cog):
             {"$set": {"message_id": message_id}}
         )
 
-    async def _build_interview_questions(self, title=None, description=None, seeds=None, custom_questions=None):
-        seeds = seeds or {}
-        custom_questions = custom_questions or []
-
-        fallback_questions = {
-            "what": "這次活動你最想做的內容是什麼？",
-            "where": "你偏好的活動地點或區域在哪裡？",
-            "when": "你可參與的時間區間是什麼？",
-            "how": "你希望活動怎麼進行（節奏、方式、分工）？",
-        }
-
-        asked_topics = [topic for topic in ["what", "where", "when", "how"] if not seeds.get(topic)]
-        generated_questions = {topic: fallback_questions[topic] for topic in asked_topics}
-
-        if asked_topics:
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if api_key:
-                try:
-                    llm = ChatGoogleGenerativeAI(
-                        model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"),
-                        google_api_key=api_key,
-                        temperature=0.2,
-                    )
-
-                    system_prompt = """
-你是活動訪綱設計助手。請依據 user 提供的活動資訊，為尚未決定的主題生成提問句。
-
-請輸出 JSON，key 只能是 what/where/when/how，value 是一句繁體中文問題。
-規則：
-1) 每題都要可直接回答，不要空泛。
-2) 不要產生 why 題。
-3) 只輸出 JSON。
-4) 如果 user 在 "活動描述" 當中有針對問題設計提出要求，請務必根據 user 的要求來生成問題。
-"""
-                    user_prompt = (
-                        f"活動標題: {str(title or '').strip()}\n"
-                        f"活動描述: {str(description or '').strip()}\n"
-                        f"已預設 seeds: {json.dumps({k: seeds.get(k) for k in ['what','where','when','how']}, ensure_ascii=False)}\n"
-                        f"需提問主題: {asked_topics}"
-                    )
-                    resp = await _ainvoke_with_system_fallback(
-                        llm,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                    )
-                    parsed = _safe_json_parse(getattr(resp, "content", ""))
-
-                    for topic in asked_topics:
-                        candidate = str((parsed or {}).get(topic) or "").strip()
-                        if candidate:
-                            generated_questions[topic] = candidate
-                except Exception:
-                    pass
-
-        questions = []
-        for topic in ["what", "where", "when", "how"]:
-            if topic in asked_topics:
-                question_text = generated_questions.get(topic) or fallback_questions[topic]
-                questions.append({
-                    "id": f"core_{topic}",
-                    "topic": topic,
-                    "text": question_text,
-                    "required": True,
-                })
-
-        for idx, text in enumerate(custom_questions[:1], start=1):
-            cleaned = str(text or "").strip()
-            if not cleaned:
-                continue
-            questions.append(
-                {
-                    "id": f"custom_{idx}",
-                    "topic": "custom",
-                    "text": cleaned,
-                    "required": True,
-                }
-            )
-
-        return questions[:5]
-
     async def create_event(
         self,
         initiator_id,
@@ -251,15 +94,13 @@ class Database(commands.Cog):
         min_participants=None,
         activity_seeds=None,
         custom_questions=None,
+        prebuilt_questions=None,
     ):
         activity_seeds = activity_seeds or {}
         custom_questions = custom_questions or []
-        interview_questions = await self._build_interview_questions(
-            title=title,
-            description=description,
-            seeds=activity_seeds,
-            custom_questions=custom_questions,
-        )
+        if prebuilt_questions is None:
+            raise ValueError("Strict LLM mode requires prebuilt_questions")
+        interview_questions = list(prebuilt_questions)
 
         host_participant = {
             "user_id": initiator_id,
