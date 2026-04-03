@@ -184,13 +184,14 @@ class Database(commands.Cog):
                     )
 
                     system_prompt = """
-你是活動訪綱設計助手。請依據活動資訊，為尚未決定的主題生成提問句。
+你是活動訪綱設計助手。請依據 user 提供的活動資訊，為尚未決定的主題生成提問句。
 
 請輸出 JSON，key 只能是 what/where/when/how，value 是一句繁體中文問題。
 規則：
 1) 每題都要可直接回答，不要空泛。
 2) 不要產生 why 題。
 3) 只輸出 JSON。
+4) 如果 user 在 "活動描述" 當中有針對問題設計提出要求，請務必根據 user 的要求來生成問題。
 """
                     user_prompt = (
                         f"活動標題: {str(title or '').strip()}\n"
