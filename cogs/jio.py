@@ -878,7 +878,6 @@ class CancelEventModal(discord.ui.Modal):
         ))
 
     async def callback(self, interaction: discord.Interaction):
-        # 🟢 加上這一行！先告訴 Discord「我收到了，正在處理中」，爭取 15 分鐘的處理時間
         await interaction.response.defer(ephemeral=True)
 
         reason = self.children[0].value
@@ -957,7 +956,7 @@ class HoldVerdictReasonModal(discord.ui.Modal):
         if target:
             try:
                 if self.verdict == "KICK":
-                    await target.send(f"主揪已裁決你離開活動。理由：{reason}")
+                    await target.send(f"🔨 主揪已裁決你離開活動。理由：{reason}")
                 else:
                     event = await db.get_event(self.event_id)
                     participant = await db.get_participant(self.event_id, self.target_user_id)
@@ -978,7 +977,7 @@ class HoldVerdictReasonModal(discord.ui.Modal):
                             remain_tip = f"\n⏳ 面試剩餘時間：約 {remain} 分鐘"
 
                     await target.send(
-                        f"主揪已裁決你可繼續訪談。理由：{reason}\n"
+                        f"🔨 主揪已裁決你可繼續訪談。理由：{reason}\n"
                         f"請繼續上一題：{question_text}{remain_tip}"
                     )
             except Exception:
@@ -1424,10 +1423,6 @@ class Jio(commands.Cog):
             now = now.replace(tzinfo=deadline.tzinfo)
         remaining = int(max(0, (deadline - now).total_seconds() // 60))
         return remaining
-
-        # Inject helper method to Jio instance if needed, or just make it static/mixin.
-        # But 'build_context_string' is on View above. Ideally it should be on Cog or helper.
-        # I'll duplicate it or move it. For now, let's put it on Cog and call it from View.
 
     async def _resolve_channel(self, channel_id):
         if not channel_id:
@@ -2409,7 +2404,16 @@ class Jio(commands.Cog):
         event = await db.get_event(event_id)
         if not event: return
 
-        if event.get("cancelled"):
+        workflow_state = str(event.get("workflow_state") or "").strip().upper()
+        adjudication_status = str(event.get("adjudication_status") or "").strip().upper()
+        if (
+            event.get("cancelled")
+            or workflow_state in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+            or adjudication_status in {"DECIDED", "CANCELLED"}
+        ):
+            return
+
+        if event.get("active") is False and not manual_trigger_user:
             return
 
         failed_event = await db.fail_event_min_participants(event_id)
@@ -2424,9 +2428,6 @@ class Jio(commands.Cog):
                     pass
             await self.disable_management_view(event_id)
             await self.log_event_state(event_id)
-            return
-        
-        if event.get("active") is False and not manual_trigger_user:
             return
             
         # 1. Mark Inactive (No more joining)
@@ -2701,6 +2702,24 @@ class Jio(commands.Cog):
 
     async def close_event_after(self, event_id, seconds):
         await asyncio.sleep(seconds)
+
+        db = self.bot.get_cog("Database")
+        if not db:
+            return
+
+        event = await db.get_event(event_id)
+        if not event:
+            return
+
+        workflow_state = str(event.get("workflow_state") or "").strip().upper()
+        adjudication_status = str(event.get("adjudication_status") or "").strip().upper()
+        if (
+            event.get("cancelled")
+            or workflow_state in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+            or adjudication_status in {"DECIDED", "CANCELLED"}
+        ):
+            return
+
         # Auto-start interview
         jio_cog = self.bot.get_cog("Jio") 
         if jio_cog:
@@ -2714,6 +2733,8 @@ class Jio(commands.Cog):
         if deadline.tzinfo is not None:
             now = now.replace(tzinfo=deadline.tzinfo)
         seconds = (deadline - now).total_seconds()
+
+        # 睡完後執行檢查，如果已經有人觸發面試結束了，就不重複執行。
         if seconds > 0:
             await asyncio.sleep(seconds)
 
@@ -2724,6 +2745,15 @@ class Jio(commands.Cog):
         kicked_ids = await db.auto_kick_interview_overdue(event_id)
         event = await db.get_event(event_id)
         if not event:
+            return
+
+        workflow_state = str(event.get("workflow_state") or "").strip().upper()
+        adjudication_status = str(event.get("adjudication_status") or "").strip().upper()
+        if (
+            event.get("cancelled")
+            or workflow_state in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+            or adjudication_status in {"DECIDED", "CANCELLED"}
+        ):
             return
 
         failed_event = await db.fail_event_min_participants_by_ready(event_id)
