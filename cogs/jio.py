@@ -730,8 +730,16 @@ class ManageSelect(discord.ui.Select):
                 await interaction.response.send_message("⛔ 只有發起人可以執行此操作。", ephemeral=True)
                 return
 
-            view = EndEarlyChoiceView(self.bot, self.event_id)
-            await interaction.response.send_message("請選擇要提早結束報名或提早結束面試。", view=view, ephemeral=True)
+            interview_started = not event.get("active", True)
+            view = EndEarlyChoiceView(self.bot, self.event_id, allow_end_signup=not interview_started)
+            if interview_started:
+                await interaction.response.send_message(
+                    "面試已開始，無法再提早截止報名；你仍可提早結束面試。",
+                    view=view,
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message("請選擇要提早結束報名或提早結束面試。", view=view, ephemeral=True)
                 
         elif value == "EDIT_SETTINGS":
              # Host Only
@@ -809,14 +817,6 @@ class JoinView(View):
             if p["user_id"] == interaction.user.id:
                  await interaction.response.send_message("✅ 您已經報名過了！", ephemeral=True)
                  return
-
-        conflict = await db.find_conflicting_interview_event(interaction.user.id, exclude_event_id=self.event_id)
-        if conflict:
-            await interaction.response.send_message(
-                f"⛔ 你目前仍在其他活動面試中：{conflict.get('title', '未命名活動')}\n請先完成該活動後再報名新的活動。",
-                ephemeral=True,
-            )
-            return
 
         deferred = False
         try:
@@ -1014,11 +1014,13 @@ class HoldVerdictReasonModal(discord.ui.Modal):
         if target:
             try:
                 if self.verdict == "KICK":
+                    await db.remove_participating_event(self.target_user_id, str(self.event_id))
                     await target.send(f"🔨 主揪已裁決你離開活動。理由：{reason}")
                 else:
                     event = await db.get_event(self.event_id)
                     participant = await db.get_participant(self.event_id, self.target_user_id)
-                    await db.set_user_active_event(self.target_user_id, str(self.event_id))
+                    await db.set_participating_event_status(self.target_user_id, str(self.event_id), "INTERVIEWING")
+                    await db.set_focus_event(self.target_user_id, str(self.event_id), status="INTERVIEWING")
 
                     question_text = "請繼續回答上一題。"
                     if event and participant:
@@ -1043,6 +1045,8 @@ class HoldVerdictReasonModal(discord.ui.Modal):
 
         jio_cog = self.bot.get_cog("Jio")
         if jio_cog:
+            if self.verdict == "KICK":
+                await jio_cog.promote_next_queued_event_for_user(self.target_user_id, completed_event_id=self.event_id)
             await jio_cog.update_dashboard(self.event_id)
 
         if self.source_view and self.source_message:
@@ -1217,7 +1221,7 @@ class DMEventSwitchSelect(discord.ui.Select):
             await interaction.response.send_message("找不到該活動，請重新整理。", ephemeral=True)
             return
 
-        await db.set_user_active_event(self.user_id, str(target_event.get("_id")))
+        await db.set_focus_event(self.user_id, str(target_event.get("_id")), status="INTERVIEWING")
         jio_cog = self.bot.get_cog("Jio")
         detail = await jio_cog.describe_current_interview_state(target_event, self.user_id) if jio_cog else ""
         await interaction.response.send_message(f"✅ 已切換到活動：{target_event.get('title', '未命名活動')}\n\n{detail}")
@@ -1230,13 +1234,31 @@ class DMEventSwitchView(View):
 
 
 class EndEarlyChoiceView(View):
-    def __init__(self, bot, event_id):
+    def __init__(self, bot, event_id, allow_end_signup=True):
         super().__init__(timeout=180)
         self.bot = bot
         self.event_id = event_id
 
+        if not allow_end_signup:
+            for child in self.children:
+                if isinstance(child, discord.ui.Button) and child.label == "提早結束報名":
+                    child.disabled = True
+
     @discord.ui.button(label="提早結束報名", style=discord.ButtonStyle.blurple)
     async def end_signup(self, button: discord.ui.Button, interaction: discord.Interaction):
+        db = self.bot.get_cog("Database")
+        event = await db.get_event(self.event_id) if db else None
+        if not event:
+            await interaction.response.send_message("活動已不存在。", ephemeral=True)
+            return
+
+        if not event.get("active", True):
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("⛔ 面試已開始，無法再提早截止報名。請改用「提早結束面試」。", ephemeral=True)
+            return
+
         # Disable buttons immediately to prevent double clicks
         for child in self.children:
             child.disabled = True
@@ -1248,8 +1270,12 @@ class EndEarlyChoiceView(View):
             return
 
         # removed defer because edit_message handles it
-        await jio_cog.start_interview_phase(self.event_id, manual_trigger_user=interaction.user)
-        await interaction.followup.send("✅ 已提前截止報名並開始面試。", ephemeral=True)
+        started = await jio_cog.start_interview_phase(self.event_id, manual_trigger_user=interaction.user)
+        if started:
+            await interaction.followup.send("✅ 已提前截止報名並開始面試。", ephemeral=True)
+            return
+
+        await interaction.followup.send("ℹ️ 此活動已在面試流程中，無需再次提早截止報名。", ephemeral=True)
 
     @discord.ui.button(label="提早結束面試", style=discord.ButtonStyle.red)
     async def end_interview(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -1500,6 +1526,140 @@ class Jio(commands.Cog):
             print(f"[DEBUG] Failed to fetch channel {channel_id}: {e}")
         return None
 
+    async def _get_event_by_id_str(self, event_id):
+        if not event_id:
+            return None
+
+        db = self.bot.get_cog("Database")
+        if not db:
+            return None
+
+        if hasattr(db, "get_event_by_id_str"):
+            try:
+                return await db.get_event_by_id_str(str(event_id))
+            except Exception:
+                return None
+
+        try:
+            return await db.get_event(ObjectId(str(event_id)))
+        except Exception:
+            return None
+
+    def _get_participant_from_event(self, event, user_id):
+        for participant in (event or {}).get("participants", []) or []:
+            if participant.get("user_id") == user_id:
+                return participant
+        return None
+
+    def _get_current_question_text(self, event, participant):
+        interview = (participant or {}).get("interview", {}) or {}
+        current_qid = str(interview.get("current_question_id") or "").strip()
+        qmap = {str(q.get("id")): str(q.get("text") or "") for q in ((event or {}).get("interview_questions", []) or [])}
+
+        if current_qid and current_qid in qmap:
+            return qmap[current_qid]
+
+        first_question = ((event or {}).get("interview_questions", []) or [None])[0]
+        if first_question:
+            return str(first_question.get("text") or "")
+        return ""
+
+    async def promote_next_queued_event_for_user(self, user_id, completed_event_id=None):
+        db = self.bot.get_cog("Database")
+        if not db:
+            return None
+
+        if completed_event_id is not None:
+            await db.remove_participating_event(user_id, str(completed_event_id))
+
+        focus_event_id = await db.get_focus_event(user_id)
+        if focus_event_id:
+            focus_event = await self._get_event_by_id_str(focus_event_id)
+            focus_participant = self._get_participant_from_event(focus_event, user_id)
+            focus_interview = (focus_participant or {}).get("interview", {}) or {}
+            focus_status = str((focus_participant or {}).get("status") or "").strip().upper()
+            if (
+                focus_event
+                and not focus_event.get("cancelled")
+                and str(focus_event.get("workflow_state") or "").strip().upper() not in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+                and str(focus_event.get("adjudication_status") or "").strip().upper() not in {"DECIDED", "CANCELLED"}
+                and focus_status in {"INTERVIEWING", "ON_HOLD"}
+                and not focus_interview.get("completed")
+            ):
+                return focus_event
+
+        participating_events = await db.get_participating_events(user_id)
+        if not participating_events:
+            await db.clear_user_active_event(user_id)
+            return None
+
+        target_event = None
+        target_entry = None
+        for entry in participating_events:
+            event_id = str(entry.get("event_id") or "").strip()
+            if not event_id:
+                continue
+
+            event = await self._get_event_by_id_str(event_id)
+            participant = self._get_participant_from_event(event, user_id)
+            interview = (participant or {}).get("interview", {}) or {}
+            status = str((participant or {}).get("status") or "").strip().upper()
+
+            if (
+                not event
+                or event.get("cancelled")
+                or str(event.get("workflow_state") or "").strip().upper() in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+                or str(event.get("adjudication_status") or "").strip().upper() in {"DECIDED", "CANCELLED"}
+                or not participant
+                or interview.get("completed")
+                or status in {"READY", "FINISHED", "KICKED", "DECLINED"}
+            ):
+                await db.remove_participating_event(user_id, event_id)
+                continue
+
+            if event.get("active", True):
+                continue
+
+            if status in {"IN_QUEUE", "INTERVIEWING", "ON_HOLD"}:
+                target_event = event
+                target_entry = entry
+                break
+
+        if not target_event or not target_entry:
+            await db.clear_user_active_event(user_id)
+            return None
+
+        target_event_id = str(target_entry.get("event_id"))
+        target_status = str((target_entry.get("status") or "").strip().upper() or "INTERVIEWING")
+
+        if target_status == "IN_QUEUE":
+            await db.update_participant_status(target_event["_id"], user_id, "INTERVIEWING")
+            await db.set_participant_reply_status(target_event["_id"], user_id, "WAITING_FOR_REPLY")
+            await db.set_participating_event_status(user_id, target_event_id, "INTERVIEWING")
+
+            question_text = self._get_current_question_text(target_event, self._get_participant_from_event(target_event, user_id))
+            remain = self._remaining_interview_minutes(target_event)
+            remain_tip = f"\n⏳ 面試剩餘時間：約 {remain} 分鐘" if remain is not None else ""
+
+            user = self.bot.get_user(user_id)
+            if not user:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except Exception:
+                    user = None
+
+            if user and question_text:
+                try:
+                    await user.send(
+                        f"⏭️ 已自動切換到下一個活動：{target_event.get('title', '未命名活動')}\n"
+                        f"➡️ 請從目前題目繼續：{question_text}{remain_tip}"
+                    )
+                except Exception:
+                    pass
+
+        await db.set_focus_event(user_id, target_event_id, status="INTERVIEWING")
+        return target_event
+
     async def disable_management_view(self, event_id):
         db = self.bot.get_cog("Database")
         if not db:
@@ -1665,6 +1825,8 @@ class Jio(commands.Cog):
         )
         await db.update_participant_status(event_id, user_id, "READY")
         await db.append_history(event_id, user_id, "system", "Participant confirmed final submission.")
+        await db.remove_participating_event(user_id, str(event_id))
+        await self.promote_next_queued_event_for_user(user_id)
 
         try:
             await interaction.user.send("✅ 已確認送出你的最終訪談結果。")
@@ -1764,7 +1926,8 @@ class Jio(commands.Cog):
         for participant in event.get("participants", []):
             uid = participant.get("user_id")
             if uid:
-                await db.clear_user_active_event_if_matches(uid, str(event_id))
+                await db.remove_participating_event(uid, str(event_id))
+                await self.promote_next_queued_event_for_user(uid)
 
         return True
 
@@ -1880,6 +2043,9 @@ class Jio(commands.Cog):
             except Exception:
                 pass
 
+        for uid in kicked_ids:
+            await self.promote_next_queued_event_for_user(uid, completed_event_id=event_id)
+
         await self.maybe_trigger_adjudication(event_id)
         await self.update_dashboard(event_id)
 
@@ -1932,10 +2098,11 @@ class Jio(commands.Cog):
         prompts = []
         targets = []
 
-        eligible_status = {"INTERVIEWING", "PENDING", "JOINED"}
+        eligible_status = {"INTERVIEWING", "PENDING", "JOINED", "IN_QUEUE"}
         interview_questions = event.get("interview_questions", []) or []
         first_question = interview_questions[0] if interview_questions else None
         initiator_id = event.get("initiator_id")
+        current_event_id = str(event_id)
 
         host_name = "Unknown Host"
         if event_channel and hasattr(event_channel, "guild") and event_channel.guild:
@@ -1980,9 +2147,24 @@ class Jio(commands.Cog):
 
             try:
                 user = await self.bot.fetch_user(uid)
-                await user.send(embed=base_embed)
                 # Ensure participant state enters interview flow even if previous update missed.
                 if first_question:
+                    focus_event_id = await db.get_focus_event(uid)
+                    should_queue = False
+                    if focus_event_id and str(focus_event_id) != current_event_id:
+                        focus_event = await self._get_event_by_id_str(focus_event_id)
+                        focus_participant = self._get_participant_from_event(focus_event, uid)
+                        focus_interview = (focus_participant or {}).get("interview", {}) or {}
+                        focus_status = str((focus_participant or {}).get("status") or "").strip().upper()
+                        should_queue = (
+                            bool(focus_event)
+                            and not focus_event.get("cancelled")
+                            and str(focus_event.get("workflow_state") or "").strip().upper() not in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
+                            and str(focus_event.get("adjudication_status") or "").strip().upper() not in {"DECIDED", "CANCELLED"}
+                            and not focus_interview.get("completed")
+                            and focus_status in {"INTERVIEWING", "ON_HOLD"}
+                        )
+
                     await db.update_participant_interview(
                         event_id,
                         uid,
@@ -1990,13 +2172,22 @@ class Jio(commands.Cog):
                         interview_completed=False,
                         confirmed=False,
                     )
-                    await db.update_participant_status(event_id, uid, "INTERVIEWING")
-                    await db.set_participant_reply_status(event_id, uid, "WAITING_FOR_REPLY")
-                    await db.set_user_active_event(uid, str(event_id))
-                    remaining = self._remaining_interview_minutes(event)
-                    remain_tip = f"\n⏳ 面試剩餘時間：約 {remaining} 分鐘" if remaining is not None else ""
-                    await user.send(f"➡️ 第 1 題：{first_question.get('text', '')}{remain_tip}")
+
+                    if should_queue:
+                        await db.update_participant_status(event_id, uid, "IN_QUEUE")
+                        await db.set_participant_reply_status(event_id, uid, "NONE")
+                        await db.add_participating_event(uid, current_event_id, status="IN_QUEUE", set_focus=False)
+                        await user.send("🕒 你目前仍在另一個活動面試中，這個活動已加入佇列。完成目前面試後會自動接續。")
+                    else:
+                        await user.send(embed=base_embed)
+                        await db.update_participant_status(event_id, uid, "INTERVIEWING")
+                        await db.set_participant_reply_status(event_id, uid, "WAITING_FOR_REPLY")
+                        await db.set_focus_event(uid, current_event_id, status="INTERVIEWING")
+                        remaining = self._remaining_interview_minutes(event)
+                        remain_tip = f"\n⏳ 面試剩餘時間：約 {remaining} 分鐘" if remaining is not None else ""
+                        await user.send(f"➡️ 第 1 題：{first_question.get('text', '')}{remain_tip}")
                 else:
+                    await user.send(embed=base_embed)
                     await db.update_participant_interview(
                         event_id,
                         uid,
@@ -2005,7 +2196,7 @@ class Jio(commands.Cog):
                         confirmed=True,
                     )
                     await db.update_participant_status(event_id, uid, "READY")
-                    await db.clear_user_active_event_if_matches(uid, str(event_id))
+                    await db.remove_participating_event(uid, current_event_id)
                 prompts.append(uid)
                 print(f"[DEBUG] Initial interview DM sent to {uid}")
             except discord.Forbidden:
@@ -2072,15 +2263,23 @@ class Jio(commands.Cog):
         if not events:
             return None
 
-        active_event_id = await db.get_user_active_event(user_id)
+        focus_event_id = await db.get_focus_event(user_id)
 
         event_by_id = {str(event["_id"]): event for event in events}
 
-        if active_event_id and active_event_id in event_by_id:
-            return event_by_id[active_event_id]
+        if focus_event_id and focus_event_id in event_by_id:
+            return event_by_id[focus_event_id]
+
+        participating_events = await db.get_participating_events(user_id)
+        for entry in participating_events:
+            event_id = str(entry.get("event_id") or "").strip()
+            status = str(entry.get("status") or "").strip().upper()
+            if event_id in event_by_id and status in {"INTERVIEWING", "ON_HOLD"}:
+                await db.set_focus_event(user_id, event_id, status=status)
+                return event_by_id[event_id]
 
         selected_event = events[0]
-        await db.set_user_active_event(user_id, str(selected_event["_id"]))
+        await db.set_focus_event(user_id, str(selected_event["_id"]), status="INTERVIEWING")
         return selected_event
 
     def _merge_answers_with_event_seeds(self, participant, event_seeds):
@@ -2206,7 +2405,7 @@ class Jio(commands.Cog):
         )
 
         initiator_id = event.get("initiator_id")
-        await db.set_user_active_event(initiator_id, str(event_id))
+        await db.set_focus_event(initiator_id, str(event_id), status="INTERVIEWING")
 
         user = self.bot.get_user(initiator_id)
         if not user:
@@ -2394,13 +2593,14 @@ class Jio(commands.Cog):
                     "participants.$[elem].status": "FINISHED",
                 }
             },
-            array_filters=[{"elem.status": {"$in": ["PENDING", "INTERVIEWING", "READY", "ON_HOLD", "JOINED"]}}],
+            array_filters=[{"elem.status": {"$in": ["PENDING", "INTERVIEWING", "IN_QUEUE", "READY", "ON_HOLD", "JOINED"]}}],
         )
 
         for participant in event.get("participants", []):
             uid = participant.get("user_id")
             if uid:
-                await db.clear_user_active_event_if_matches(uid, str(event_id))
+                await db.remove_participating_event(uid, str(event_id))
+                await self.promote_next_queued_event_for_user(uid)
 
         await self.disable_management_view(event_id)
 
@@ -2482,7 +2682,8 @@ class Jio(commands.Cog):
     async def start_interview_phase(self, event_id, manual_trigger_user=None):
         db = self.bot.get_cog("Database")
         event = await db.get_event(event_id)
-        if not event: return
+        if not event:
+            return False
 
         workflow_state = str(event.get("workflow_state") or "").strip().upper()
         adjudication_status = str(event.get("adjudication_status") or "").strip().upper()
@@ -2491,10 +2692,12 @@ class Jio(commands.Cog):
             or workflow_state in {"CANCELLED", "FAILED_MIN_PARTICIPANTS", "FINISHED"}
             or adjudication_status in {"DECIDED", "CANCELLED"}
         ):
-            return
+            return False
 
-        if event.get("active") is False and not manual_trigger_user:
-            return
+        if event.get("active") is False:
+            if manual_trigger_user:
+                print(f"[DEBUG] Manual start_interview_phase ignored: event {event_id} already in interview phase")
+            return False
 
         failed_event = await db.fail_event_min_participants(event_id)
         if failed_event:
@@ -2508,7 +2711,7 @@ class Jio(commands.Cog):
                     pass
             await self.disable_management_view(event_id)
             await self.log_event_state(event_id)
-            return
+            return False
             
         # 1. Mark Inactive (No more joining)
         await db.events.update_one({"_id": event_id}, {"$set": {"active": False}})
@@ -2524,14 +2727,8 @@ class Jio(commands.Cog):
             except:
                 pass
 
-        # 2.5 Update PENDING users to INTERVIEWING
-        # We need to do this so on_message can detect them
-        # And also so the Agent knows they are active targets
-        await db.events.update_one(
-            {"_id": event_id, "participants.status": "PENDING"},
-            {"$set": {"participants.$[elem].status": "INTERVIEWING"}},
-            array_filters=[{"elem.status": "PENDING"}]
-        )
+        # 2.5 Keep participant statuses unchanged here.
+        # `_send_initial_interview_prompts` will assign INTERVIEWING or IN_QUEUE per user.
         
         # [NEW] Remove Join Button from Creation Message
         try:
@@ -2601,7 +2798,8 @@ class Jio(commands.Cog):
             for participant in event.get("participants", []):
                 uid = participant.get("user_id")
                 if uid:
-                    await db.clear_user_active_event_if_matches(uid, str(event_id))
+                    await db.remove_participating_event(uid, str(event_id))
+                    await self.promote_next_queued_event_for_user(uid)
 
             if event_channel:
                 try:
@@ -2616,7 +2814,7 @@ class Jio(commands.Cog):
             await self.disable_management_view(event_id)
             await self.update_dashboard(event_id)
             await self.log_event_state(event_id)
-            return
+            return True
 
         # 3. Send first interview question to all interviewing participants.
         await self._send_initial_interview_prompts(event, event_channel=event_channel)
@@ -2651,6 +2849,7 @@ class Jio(commands.Cog):
         # Update dashboard
         await self.update_dashboard(event_id)
         await self.log_event_state(event_id)
+        return True
 
 
     async def update_dashboard(self, event_id):
@@ -2715,6 +2914,7 @@ class Jio(commands.Cog):
         
         text_joined = []
         text_interviewing = []
+        text_in_queue = []
         text_ready = []
         text_kicked = []
         text_on_hold = []
@@ -2733,6 +2933,8 @@ class Jio(commands.Cog):
                 text_joined.append(line)
             elif status == "INTERVIEWING":
                 text_interviewing.append(line)
+            elif status == "IN_QUEUE":
+                text_in_queue.append(line)
             elif status == "READY":
                 text_ready.append(line)
             elif status == "KICKED":
@@ -2742,6 +2944,7 @@ class Jio(commands.Cog):
         
         if text_joined: embed.add_field(name="剛加入 (Joined)", value="\n".join(text_joined), inline=False)
         if text_interviewing: embed.add_field(name="面試中 (Interviewing)", value="\n".join(text_interviewing), inline=False)
+        if text_in_queue: embed.add_field(name="排隊中 (In Queue)", value="\n".join(text_in_queue), inline=False)
         if text_on_hold: embed.add_field(name="待主揪裁決 (ON_HOLD)", value="\n".join(text_on_hold), inline=False)
         if text_ready: embed.add_field(name="準備好了 (Ready)", value="\n".join(text_ready), inline=False)
         if text_kicked: embed.add_field(name="已踢出 (Kicked)", value="\n".join(text_kicked), inline=False)
@@ -2863,6 +3066,9 @@ class Jio(commands.Cog):
             mentions = " ".join([f"<@{uid}>" for uid in kicked_ids])
             await host.send(f"⏱️ 面試截止已到，以下成員因未完成訪談而被移出：{mentions}")
 
+        for uid in kicked_ids:
+            await self.promote_next_queued_event_for_user(uid, completed_event_id=event_id)
+
         await self.maybe_trigger_adjudication(event_id)
         await self.update_dashboard(event_id)
         await self.log_event_state(event_id)
@@ -2921,6 +3127,21 @@ class Jio(commands.Cog):
 
             resolved = await self.resolve_event_for_dm(message.author.id, message.content)
             if resolved is None:
+                participating_events = await db.get_participating_events(message.author.id)
+                queued_ids = [
+                    str(item.get("event_id") or "").strip()
+                    for item in participating_events
+                    if str(item.get("status") or "").strip().upper() == "IN_QUEUE"
+                ]
+                if queued_ids:
+                    queued_titles = []
+                    for event_id in queued_ids[:3]:
+                        queued_event = await self._get_event_by_id_str(event_id)
+                        if queued_event:
+                            queued_titles.append(queued_event.get("title", "未命名活動"))
+
+                    suffix = f"（{', '.join(queued_titles)}）" if queued_titles else ""
+                    await message.author.send(f"🕒 你目前沒有可回覆的進行中題目，仍在排隊中 {suffix}。完成目前焦點活動後會自動接續。")
                 return
 
             event = resolved
@@ -2934,6 +3155,10 @@ class Jio(commands.Cog):
             participant = await db.get_participant(event_id, message.author.id)
             if participant and participant.get("status") == "ON_HOLD":
                 await message.author.send("目前你已被暫時停權，請等待主揪裁決後再繼續。")
+                return
+
+            if participant and participant.get("status") == "IN_QUEUE":
+                await message.author.send("⏳ 你在這個活動目前是排隊狀態，完成當前焦點活動後會自動接續。")
                 return
 
             interview = (participant or {}).get("interview", {}) or {}

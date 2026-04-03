@@ -3,6 +3,7 @@ import datetime
 from urllib.parse import urlparse
 
 import motor.motor_asyncio
+from bson import ObjectId
 from discord.ext import commands
 
 
@@ -38,7 +39,14 @@ class Database(commands.Cog):
     async def create_user(self, user_id):
         await self.users.update_one(
             {"_id": user_id},
-            {"$setOnInsert": {"strikes": 0, "ping_allowed": True}},
+            {
+                "$setOnInsert": {
+                    "strikes": 0,
+                    "ping_allowed": True,
+                    "participating_events": [],
+                    "focus_event_id": None,
+                }
+            },
             upsert=True
         )
 
@@ -47,33 +55,284 @@ class Database(commands.Cog):
         user = await self.get_user(user_id)
         return user["strikes"] if user else 0
 
-    async def set_user_active_event(self, user_id, event_id):
+    def _normalize_participating_events(self, entries):
+        normalized = []
+        seen = set()
+
+        for item in entries or []:
+            event_id = ""
+            status = "INTERVIEWING"
+
+            if isinstance(item, str):
+                event_id = str(item).strip()
+            elif isinstance(item, dict):
+                event_id = str(item.get("event_id") or "").strip()
+                status = str(item.get("status") or "INTERVIEWING").strip().upper() or "INTERVIEWING"
+            else:
+                continue
+
+            if not event_id or event_id in seen:
+                continue
+
+            seen.add(event_id)
+            normalized.append({"event_id": event_id, "status": status})
+
+        return normalized
+
+    async def migrate_active_event_if_needed(self, user_id):
+        user = await self.get_user(user_id)
+        if not user:
+            await self.create_user(user_id)
+            return await self.get_user(user_id)
+
+        participating_raw = user.get("participating_events")
+        participating_events = self._normalize_participating_events(participating_raw)
+        focus_event_id = str(user.get("focus_event_id") or "").strip()
+        legacy_active = str(user.get("active_event_id") or "").strip()
+
+        updates = {}
+        changed = False
+
+        if not isinstance(participating_raw, list) or participating_events != participating_raw:
+            updates["participating_events"] = participating_events
+            changed = True
+
+        if "focus_event_id" not in user:
+            updates["focus_event_id"] = None
+            changed = True
+
+        if legacy_active:
+            existing_ids = {item["event_id"] for item in participating_events}
+            if legacy_active not in existing_ids:
+                participating_events.append({"event_id": legacy_active, "status": "INTERVIEWING"})
+                updates["participating_events"] = participating_events
+                changed = True
+            if not focus_event_id:
+                updates["focus_event_id"] = legacy_active
+                focus_event_id = legacy_active
+                changed = True
+            updates["active_event_id"] = None
+            changed = True
+
+        if focus_event_id:
+            ids = {item["event_id"] for item in participating_events}
+            if focus_event_id not in ids:
+                updates["focus_event_id"] = participating_events[0]["event_id"] if participating_events else None
+                changed = True
+
+        if changed:
+            await self.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": updates,
+                    "$setOnInsert": {
+                        "strikes": 0,
+                        "ping_allowed": True,
+                    },
+                },
+                upsert=True,
+            )
+            user = await self.get_user(user_id)
+
+        return user
+
+    async def get_participating_events(self, user_id):
+        user = await self.migrate_active_event_if_needed(user_id)
+        if not user:
+            return []
+        return self._normalize_participating_events(user.get("participating_events") or [])
+
+    async def get_focus_event(self, user_id):
+        user = await self.migrate_active_event_if_needed(user_id)
+        if not user:
+            return None
+
+        focus_event_id = str(user.get("focus_event_id") or "").strip()
+        participating_events = self._normalize_participating_events(user.get("participating_events") or [])
+        participating_ids = {item["event_id"] for item in participating_events}
+
+        if focus_event_id and focus_event_id in participating_ids:
+            return focus_event_id
+
+        if not participating_events:
+            return None
+
+        fallback_focus = participating_events[0]["event_id"]
         await self.users.update_one(
             {"_id": user_id},
             {
-                "$set": {"active_event_id": str(event_id)},
-                "$setOnInsert": {"strikes": 0, "ping_allowed": True}
+                "$set": {"focus_event_id": fallback_focus, "active_event_id": fallback_focus},
+                "$setOnInsert": {
+                    "strikes": 0,
+                    "ping_allowed": True,
+                },
             },
-            upsert=True
+            upsert=True,
+        )
+        return fallback_focus
+
+    async def add_participating_event(self, user_id, event_id, status="INTERVIEWING", set_focus=False):
+        normalized_event_id = str(event_id)
+        normalized_status = str(status or "INTERVIEWING").strip().upper() or "INTERVIEWING"
+
+        user = await self.migrate_active_event_if_needed(user_id)
+        participating_events = self._normalize_participating_events((user or {}).get("participating_events") or [])
+
+        found = False
+        for item in participating_events:
+            if item["event_id"] == normalized_event_id:
+                item["status"] = normalized_status
+                found = True
+                break
+        if not found:
+            participating_events.append({"event_id": normalized_event_id, "status": normalized_status})
+
+        current_focus = str((user or {}).get("focus_event_id") or "").strip()
+        next_focus = normalized_event_id if (set_focus or not current_focus) else current_focus
+
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "participating_events": participating_events,
+                    "focus_event_id": next_focus,
+                    "active_event_id": next_focus,
+                },
+                "$setOnInsert": {
+                    "strikes": 0,
+                    "ping_allowed": True,
+                },
+            },
+            upsert=True,
         )
 
+    async def set_participating_event_status(self, user_id, event_id, status):
+        normalized_event_id = str(event_id)
+        normalized_status = str(status or "INTERVIEWING").strip().upper() or "INTERVIEWING"
+
+        user = await self.migrate_active_event_if_needed(user_id)
+        participating_events = self._normalize_participating_events((user or {}).get("participating_events") or [])
+
+        found = False
+        for item in participating_events:
+            if item["event_id"] == normalized_event_id:
+                item["status"] = normalized_status
+                found = True
+                break
+        if not found:
+            participating_events.append({"event_id": normalized_event_id, "status": normalized_status})
+
+        focus = str((user or {}).get("focus_event_id") or "").strip() or normalized_event_id
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "participating_events": participating_events,
+                    "focus_event_id": focus,
+                    "active_event_id": focus,
+                },
+                "$setOnInsert": {
+                    "strikes": 0,
+                    "ping_allowed": True,
+                },
+            },
+            upsert=True,
+        )
+
+    async def set_focus_event(self, user_id, event_id, status="INTERVIEWING"):
+        await self.add_participating_event(user_id, event_id, status=status, set_focus=True)
+
+    async def remove_participating_event(self, user_id, event_id):
+        normalized_event_id = str(event_id)
+
+        user = await self.migrate_active_event_if_needed(user_id)
+        participating_events = self._normalize_participating_events((user or {}).get("participating_events") or [])
+        participating_events = [item for item in participating_events if item["event_id"] != normalized_event_id]
+
+        current_focus = str((user or {}).get("focus_event_id") or "").strip()
+        valid_ids = {item["event_id"] for item in participating_events}
+        if current_focus and current_focus in valid_ids and current_focus != normalized_event_id:
+            next_focus = current_focus
+        else:
+            next_focus = participating_events[0]["event_id"] if participating_events else None
+
+        if next_focus:
+            await self.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "participating_events": participating_events,
+                        "focus_event_id": next_focus,
+                        "active_event_id": next_focus,
+                    },
+                    "$setOnInsert": {
+                        "strikes": 0,
+                        "ping_allowed": True,
+                    },
+                },
+                upsert=True,
+            )
+            return next_focus
+
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {"participating_events": participating_events},
+                "$unset": {"focus_event_id": "", "active_event_id": ""},
+                "$setOnInsert": {
+                    "strikes": 0,
+                    "ping_allowed": True,
+                },
+            },
+            upsert=True,
+        )
+        return None
+
+    # Backward-compatible wrappers for legacy call sites.
+    async def set_user_active_event(self, user_id, event_id):
+        await self.set_focus_event(user_id, event_id, status="INTERVIEWING")
+
     async def get_user_active_event(self, user_id):
-        user = await self.get_user(user_id)
+        return await self.get_focus_event(user_id)
+
+    async def clear_focus_event_if_matches(self, user_id, event_id):
+        user = await self.migrate_active_event_if_needed(user_id)
         if not user:
-            return None
-        return user.get("active_event_id")
+            return
+
+        current_focus = str(user.get("focus_event_id") or "").strip()
+        if current_focus != str(event_id):
+            return
+
+        remaining = self._normalize_participating_events(user.get("participating_events") or [])
+        if remaining:
+            next_focus = remaining[0]["event_id"]
+            await self.users.update_one(
+                {"_id": user_id},
+                {"$set": {"focus_event_id": next_focus, "active_event_id": next_focus}},
+            )
+            return
+
+        await self.users.update_one(
+            {"_id": user_id},
+            {"$unset": {"focus_event_id": "", "active_event_id": ""}},
+        )
 
     async def clear_user_active_event(self, user_id):
         await self.users.update_one(
             {"_id": user_id},
-            {"$unset": {"active_event_id": ""}}
+            {"$unset": {"focus_event_id": "", "active_event_id": ""}}
         )
 
     async def clear_user_active_event_if_matches(self, user_id, event_id):
-        await self.users.update_one(
-            {"_id": user_id, "active_event_id": str(event_id)},
-            {"$unset": {"active_event_id": ""}}
-        )
+        await self.remove_participating_event(user_id, event_id)
+
+    async def get_event_by_id_str(self, event_id):
+        try:
+            oid = ObjectId(str(event_id))
+        except Exception:
+            return None
+        return await self.get_event(oid)
 
     # Event Methods
     async def update_event_message_id(self, event_id, message_id):
@@ -169,7 +428,7 @@ class Database(commands.Cog):
 
     def active_participant_count(self, event):
         participants = (event or {}).get("participants", []) or []
-        active_statuses = {"PENDING", "INTERVIEWING", "READY", "ON_HOLD"}
+        active_statuses = {"PENDING", "INTERVIEWING", "IN_QUEUE", "READY", "ON_HOLD"}
         return sum(1 for p in participants if p.get("status") in active_statuses)
 
     async def cancel_event(self, event_id, cancelled_by, reason=""):
