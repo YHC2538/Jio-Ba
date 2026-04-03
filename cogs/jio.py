@@ -439,6 +439,7 @@ class JioCreationModal(discord.ui.Modal):
                 initiator_id=interaction.user.id,
                 description=final_description,
                 channel_id=self.channel_id,
+                initiator_name=interaction.user.display_name,
                 title=title,
                 signup_deadline=signup_deadline,
                 interview_deadline=interview_deadline,
@@ -829,7 +830,11 @@ class JoinView(View):
 
         db = self.bot.get_cog("Database")
 
-        await db.add_participant(self.event_id, interaction.user.id)
+        await db.add_participant(
+            self.event_id,
+            interaction.user.id,
+            user_name=interaction.user.display_name,
+        )
 
         await db.append_history(
             self.event_id,
@@ -837,6 +842,8 @@ class JoinView(View):
             "system",
             "Participant joined the activity.",
             author_name=interaction.user.display_name,
+            targets=[interaction.user.id],
+            message_type="system_event",
         )
         await db.update_participant_status(self.event_id, interaction.user.id, "PENDING")
         
@@ -1430,6 +1437,9 @@ class ManualAnswerEditModal(discord.ui.Modal):
             self.user_id,
             "system",
             f"Participant manually edited answer for {self.question_id}: '{old_answer}' -> '{new_answer}'",
+            targets=[self.user_id],
+            question_id=self.question_id,
+            message_type="system_event",
         )
 
         if self.source_message:
@@ -1824,7 +1834,15 @@ class Jio(commands.Cog):
             confirmed=True,
         )
         await db.update_participant_status(event_id, user_id, "READY")
-        await db.append_history(event_id, user_id, "system", "Participant confirmed final submission.")
+        await db.append_history(
+            event_id,
+            user_id,
+            "system",
+            "Participant confirmed final submission.",
+            targets=[user_id],
+            question_id="confirm_submit",
+            message_type="system_event",
+        )
         await db.remove_participating_event(user_id, str(event_id))
         await self.promote_next_queued_event_for_user(user_id)
 
@@ -2213,7 +2231,15 @@ class Jio(commands.Cog):
 
         if prompts:
             first_text = first_question.get("text", "無") if first_question else "無"
-            await db.append_history(event_id, None, "model", f"Interview started. First question: {first_text}", targets=prompts)
+            await db.append_history(
+                event_id,
+                None,
+                "model",
+                f"Interview started. First question: {first_text}",
+                targets=prompts,
+                question_id=first_question.get("id") if first_question else None,
+                message_type="system_event",
+            )
         else:
             print(f"[WARN] No initial interview DM sent. Eligible targets: {targets}")
     
@@ -2240,6 +2266,9 @@ class Jio(commands.Cog):
 
     async def collect_candidate_events_for_user(self, user_id):
         db = self.bot.get_cog("Database")
+
+        # This query is designed to find events that the user is currently participating in, where the event is not cancelled, not in a final workflow state, and the user's participation status is either INTERVIEWING or ON_HOLD with an incomplete interview. 
+        # The results are sorted by event ID in descending order (most recent first).
         cursor = db.events.find(
             {
                 "cancelled": {"$ne": True},
@@ -2267,10 +2296,14 @@ class Jio(commands.Cog):
 
         event_by_id = {str(event["_id"]): event for event in events}
 
+        # First try to use the focus event if it's still valid
         if focus_event_id and focus_event_id in event_by_id:
             return event_by_id[focus_event_id]
 
         participating_events = await db.get_participating_events(user_id)
+
+        # If no valid focus event, try to find the most recent participating event that is still active,
+        # and has the user in INTERVIEWING or ON_HOLD status with incomplete interview.
         for entry in participating_events:
             event_id = str(entry.get("event_id") or "").strip()
             status = str(entry.get("status") or "").strip().upper()
@@ -2278,6 +2311,7 @@ class Jio(commands.Cog):
                 await db.set_focus_event(user_id, event_id, status=status)
                 return event_by_id[event_id]
 
+        # As a fallback, just take the most recent event from the candidate list and set it as focus.
         selected_event = events[0]
         await db.set_focus_event(user_id, str(selected_event["_id"]), status="INTERVIEWING")
         return selected_event
@@ -3172,7 +3206,16 @@ class Jio(commands.Cog):
                 return
             
             # Log User Msg
-            await db.append_history(event_id, message.author.id, "user", message.content, author_name=message.author.display_name)
+            await db.append_history(
+                event_id,
+                message.author.id,
+                "user",
+                message.content,
+                author_name=message.author.display_name,
+                targets=[message.author.id],
+                question_id=interview.get("current_question_id"),
+                message_type="user_response",
+            )
             await db.set_participant_reply_status(event_id, message.author.id, "REPLIED")
 
             # Invoke Agent (Via Queue)
@@ -3180,7 +3223,6 @@ class Jio(commands.Cog):
                 print(f"[DEBUG LOG] Queueing message for AIBrain... (Event {event_id})")
                 try:
                     await brain.queue_message(str(event_id), message.author.id, message.content, message.author.display_name)
-                    # We don't wait for result here. It runs in background.
                 except Exception as e:
                     print(f"[DEBUG LOG] AIBrain queue FAILED: {e}")
                     import traceback
@@ -3218,13 +3260,12 @@ class Jio(commands.Cog):
                     "status": p["status"],
                     "answers": (p.get("interview", {}) or {}).get("answers", {}),
                     "warning_count": p.get("warning_count", 0),
-                    # [MODIFIED] History is now global, so per-user count is less relevant or needs filter
-                    # "history_count": len(p.get("conversation_history", [])) 
+                    "conversation_history_count": len(p.get("conversation_history", []) or []),
                 }
                 export_data["participants"].append(p_data)
             
-            # [NEW] Add global history to export
-            export_data["conversation_history_count"] = len(event.get("conversation_history", []))
+            # Global history now stores system/broadcast messages only.
+            export_data["global_history_count"] = len(event.get("conversation_history", []))
             export_data["workflow_state"] = event.get("workflow_state", "RECRUITING")
 
             # Ensure directory exists

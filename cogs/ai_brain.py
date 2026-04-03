@@ -212,12 +212,6 @@ class AIBrain(commands.Cog):
             version = int(self.thread_versions.get(base_thread_key, 1) or 1)
             thread_id = f"{base_thread_key}:v{version}"
             
-            # Move invoke inside lock to ensure we don't start next one until this finishes?
-            # YES. The whole point is to serialize the AI processing to prevent concurrent history updates.
-            # If we release lock before invoke completes, the next request might fetch STALE history 
-            # (because the first invoke hasn't written its response yet).
-            # Writing response happens via TOOLS (send_message -> update_history).
-            
             try:
                 print(f"[DEBUG LOG] Starting graph.ainvoke with inputs: {user_inputs}")
                 loading_msg = None
@@ -233,6 +227,20 @@ class AIBrain(commands.Cog):
                             loading_msg = await user_for_loading.send("⏳ 正在思考與處理您的回覆中，請稍候...")
                         except Exception as e:
                             print(f"[DEBUG LOG] Failed to send loading message: {e}")
+
+                input_user_names = {}
+                for input_uid in list((user_inputs or {}).keys()):
+                    display_name = None
+                    if target_uid is not None and int(input_uid) == int(target_uid) and user_for_loading:
+                        display_name = getattr(user_for_loading, "display_name", None) or getattr(user_for_loading, "name", None)
+                    if not display_name:
+                        try:
+                            user_obj = self.bot.get_user(int(input_uid)) or await self.bot.fetch_user(int(input_uid))
+                            display_name = getattr(user_obj, "display_name", None) or getattr(user_obj, "name", None)
+                        except Exception:
+                            display_name = None
+                    input_user_names[str(input_uid)] = display_name or f"User {input_uid}"
+
                 trace_config = {
                     "run_name": "jio_ba_interview_graph",
                     "tags": ["jio-ba", "discord", f"event:{event_id}"],
@@ -240,6 +248,7 @@ class AIBrain(commands.Cog):
                         "event_id": event_id,
                         "participant_count": len(event.get("participants", [])),
                         "input_user_ids": list(user_inputs.keys()),
+                        "input_user_names": input_user_names,
                     },
                     "configurable": {
                         "thread_id": thread_id,
@@ -336,6 +345,9 @@ class AIBrain(commands.Cog):
                             target_uid,
                             "model",
                             "Entered final review stage. Waiting for participant confirm/edit via submission card.",
+                            targets=[target_uid],
+                            question_id=cqid,
+                            message_type="system_event",
                         )
                     except Exception as review_err:
                         print(f"[DEBUG LOG] Failed to send submission review card: {review_err}")
@@ -403,7 +415,15 @@ class AIBrain(commands.Cog):
                                                   else:
                                                       await user.send(text_to_send)
                                                       
-                                              await db_cog.append_history(ObjectId(event_id), target_uid, "model", log_content)
+                                              await db_cog.append_history(
+                                                  ObjectId(event_id),
+                                                  target_uid,
+                                                  "model",
+                                                  log_content,
+                                                  targets=[target_uid],
+                                                  question_id=final_state.get("current_question_id"),
+                                                  message_type="ai_response",
+                                              )
                                          except Exception as e:
                                               print(f"Failed to send DM: {e}")
                             break

@@ -346,6 +346,7 @@ class Database(commands.Cog):
         initiator_id,
         description,
         channel_id,
+        initiator_name=None,
         title="未命名活動",
         message_id=None,
         signup_deadline=None,
@@ -363,8 +364,10 @@ class Database(commands.Cog):
 
         host_participant = {
             "user_id": initiator_id,
+            "user_name": str(initiator_name or f"User {initiator_id}"),
             "role": "HOST",
             "status": "PENDING",
+            "conversation_history": [],
             "interview": {
                 "current_question_id": interview_questions[0]["id"] if interview_questions else None,
                 "answers": {},
@@ -484,18 +487,9 @@ class Database(commands.Cog):
         )
         return await self.get_event(event_id)
 
-    def ready_plus_host_count(self, event):
+    def ready_count(self, event):
         participants = (event or {}).get("participants", []) or []
-        count = 0
-        for participant in participants:
-            role = participant.get("role")
-            status = participant.get("status")
-            if role == "HOST":
-                count += 1
-                continue
-            if status == "READY":
-                count += 1
-        return count
+        return sum(1 for participant in participants if participant.get("status") == "READY")
 
     async def fail_event_min_participants_by_ready(self, event_id):
         event = await self.get_event(event_id)
@@ -506,7 +500,7 @@ class Database(commands.Cog):
         if not min_required:
             return None
 
-        current = self.ready_plus_host_count(event)
+        current = self.ready_count(event)
         if current >= int(min_required):
             return None
 
@@ -558,7 +552,7 @@ class Database(commands.Cog):
         return await self.events.find_one(query, sort=[("_id", -1)])
 
     # Participant Methods
-    async def add_participant(self, event_id, user_id):
+    async def add_participant(self, event_id, user_id, user_name=None):
         event = await self.events.find_one({"_id": event_id})
         if not event: return
         
@@ -567,8 +561,10 @@ class Database(commands.Cog):
             questions = event.get("interview_questions", [])
             participant_doc = {
                 "user_id": user_id,
+                "user_name": str(user_name or f"User {user_id}"),
                 "role": "PARTICIPANT",
                 "status": "PENDING",
+                "conversation_history": [],
                 "interview": {
                     "current_question_id": questions[0]["id"] if questions else None,
                     "answers": {},
@@ -608,24 +604,92 @@ class Database(commands.Cog):
             {"$set": {"participants.$.status": status}}
         )
 
-    async def append_history(self, event_id, user_id, role, content, author_name=None, targets=None):
+    async def append_history(
+        self,
+        event_id,
+        user_id,
+        role,
+        content,
+        author_name=None,
+        targets=None,
+        question_id=None,
+        message_type=None,
+        metadata=None,
+    ):
         # role: "user" or "model" or "system"
         import datetime
+
         now = datetime.datetime.utcnow()
-        
-        msg = {
-            "role": role, 
-            "parts": [content],
+        normalized_role = str(role or "system").strip().lower() or "system"
+        text_content = str(content or "")
+
+        if message_type is None:
+            if normalized_role == "user":
+                message_type = "user_response"
+            elif normalized_role == "model":
+                message_type = "ai_response"
+            else:
+                message_type = "system_event"
+
+        normalized_targets = []
+        raw_targets = targets or []
+        if not isinstance(raw_targets, list):
+            raw_targets = [raw_targets]
+        for target in raw_targets:
+            try:
+                normalized_targets.append(int(target))
+            except Exception:
+                continue
+        normalized_targets = list(dict.fromkeys(normalized_targets))
+
+        inferred_target = None
+        try:
+            if user_id is not None:
+                inferred_target = int(user_id)
+        except Exception:
+            inferred_target = None
+
+        participant_scope = normalized_role in {"user", "model"} or bool(normalized_targets)
+        participant_targets = list(normalized_targets)
+        if not participant_targets and participant_scope and inferred_target is not None:
+            participant_targets = [inferred_target]
+
+        base_msg = {
+            "role": normalized_role,
+            "parts": [text_content],
             "timestamp": now.isoformat(),
-            "author_id": user_id if role == "user" else "AI",
-            "author_name": author_name or ("User" if role == "user" else "AI"),
-            "targets": targets or [] # [NEW] List of user_ids this message is directed to
+            "author_id": inferred_target if normalized_role == "user" else "AI",
+            "author_name": author_name or (f"User {inferred_target}" if normalized_role == "user" and inferred_target is not None else "AI"),
+            "targets": list(participant_targets),
+            "question_id": str(question_id) if question_id is not None else None,
+            "message_type": str(message_type),
+            "participant_thread_id": inferred_target if normalized_role == "user" and inferred_target is not None else None,
+            "metadata": metadata or {},
         }
-        
-        # [MODIFIED] Push to GLOBAL event history
+
+        if participant_scope and participant_targets:
+            delivered = 0
+            for target_uid in participant_targets:
+                participant_msg = dict(base_msg)
+                participant_msg["targets"] = [target_uid]
+                participant_msg["participant_thread_id"] = target_uid
+
+                result = await self.events.update_one(
+                    {"_id": event_id, "participants.user_id": target_uid},
+                    {"$push": {"participants.$.conversation_history": participant_msg}},
+                )
+                if getattr(result, "matched_count", 0):
+                    delivered += 1
+
+            if delivered > 0:
+                return
+
+        # Keep event-level history only for system/broadcast logs or fallback.
+        global_msg = dict(base_msg)
+        global_msg["participant_thread_id"] = None
         await self.events.update_one(
             {"_id": event_id},
-            {"$push": {"conversation_history": msg}}
+            {"$push": {"conversation_history": global_msg}}
         )
     
     async def set_participant_reply_status(self, event_id, user_id, status):

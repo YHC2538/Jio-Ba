@@ -24,7 +24,14 @@ def get_dinner_tools(bot):
                 if db:
                     from bson import ObjectId
                     if ObjectId.is_valid(event_id):
-                        await db.append_history(ObjectId(event_id), user_id, "model", content)
+                        await db.append_history(
+                            ObjectId(event_id),
+                            user_id,
+                            "model",
+                            content,
+                            targets=[user_id],
+                            message_type="ai_response",
+                        )
                     else:
                          print(f"[WARN] Invalid event_id {event_id} in send_message, history not saved.")
                 
@@ -298,7 +305,14 @@ def get_dinner_tools(bot):
         if db:
             for content, uids in content_map.items():
                 # Append one history entry for this content aimed at multiple users
-                await db.append_history(oid, None, "model", content, targets=uids)
+                await db.append_history(
+                    oid,
+                    None,
+                    "model",
+                    content,
+                    targets=uids,
+                    message_type="ai_response",
+                )
 
         return "Batch Send Results: " + ", ".join(results)
 
