@@ -1,13 +1,13 @@
 import json
 import logging
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage      
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.runnables import RunnableConfig # 記得在最上面 import
+from langchain_core.runnables import RunnableConfig
 
 from cogs.interview_state import InterviewState, next_question_id
 
@@ -70,11 +70,10 @@ class AnalyzeResult(BaseModel):
     analysis: str = Field(description="為何判斷為充分或不充分的理由，限 25 字內。", default="")
 
 
-async def analyze_node(state: InterviewState, config: RunnableConfig) -> InterviewState:        
+async def analyze_node(state: InterviewState, config: RunnableConfig) -> dict[str, Any]:
     """合併版節點：分析使用者輸入，同時檢查是否惡意，並提取答案"""
     current_q_text = _get_current_question_text(state)
     latest_msg = _to_text(state["messages"][-1].content if state.get("messages") else "")
-    dealbreakers = state.get("dealbreakers", [])
 
     # 提示
     instruction = f"""
@@ -159,7 +158,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> Intervi
         return {"route": "reprompt", "is_malicious": False}
 
 
-async def reprompt_node(state: InterviewState,config: RunnableConfig) -> InterviewState:       
+async def reprompt_node(state: InterviewState, config: RunnableConfig) -> dict[str, Any]:
     """如果沒有獲得充分回答，需要追問"""
     current_q_text = _get_current_question_text(state)
     latest_msg = _to_text(state["messages"][-1].content if state.get("messages") else "")
@@ -200,7 +199,7 @@ async def reprompt_node(state: InterviewState,config: RunnableConfig) -> Intervi
         "messages": [response]
     }
 
-async def next_question_node(state: InterviewState) -> InterviewState:
+async def next_question_node(state: InterviewState) -> dict[str, Any]:
     """進入下一題，並呈現填寫進度表單"""
     next_id = next_question_id(state["current_question_id"], state["questions"], state["answers"])
     is_sufficient = state.get("extracted", {}).get("is_sufficient", False)
@@ -251,7 +250,7 @@ async def next_question_node(state: InterviewState) -> InterviewState:
         "route": "standby"
     }
 
-async def malicious_node(state: InterviewState) -> InterviewState:      
+async def malicious_node(state: InterviewState) -> dict[str, Any]:
     warnings = state.get("warning_count", 0) + 1
     threshold = state.get("warning_threshold", 5)
     
@@ -274,24 +273,13 @@ async def malicious_node(state: InterviewState) -> InterviewState:
         "warning_count": warnings
     }
 
-async def hold_node(state: InterviewState) -> InterviewState:
+async def hold_node(state: InterviewState) -> dict[str, Any]:
     embed_data = {
         "title": "🛑 系統停權通知",
         "description": "因為多次違規或無法獲得明確的回應，您的面試流程已暫時停權。\n\n後續結果將交由活動發起人定奪，請靜候通知。",
         "color": 0x95a5a6
     }
     return {
-        "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")]
-    }
-
-async def finalize_node(state: InterviewState) -> InterviewState:       
-    embed_data = {
-        "title": "🎉 面試完成！",
-        "description": "太感謝啦！你的所有回答我都記錄起來了，我已經整理給主辦人了。後續如果活動方案確定就會通知你參與活動哦！",
-        "color": 0xf1c40f
-    }
-    return {
-        "interview_completed": True,
         "messages": [AIMessage(content=f"EMBED_JSON:{json.dumps(embed_data, ensure_ascii=False)}")]
     }
 
@@ -312,23 +300,16 @@ def route_warning_check(state: InterviewState) -> str:
     threshold = state.get("warning_threshold", 5)
     if warnings >= threshold:
         return "hold"
-
-    route = state.get("route", "")
-    if route == "finalize":
-        return "finalize"
-    elif route == "standby":
-        return END  # 等待使用者下一次輸入
     return END
 
 # --- 建立 Graph ---
-def create_graph(bot):
+def create_graph():
     workflow = StateGraph(InterviewState)
     workflow.add_node("analyze", analyze_node)
     workflow.add_node("reprompt", reprompt_node)
     workflow.add_node("next_question", next_question_node)
     workflow.add_node("malicious", malicious_node)
     workflow.add_node("hold", hold_node)
-    workflow.add_node("finalize", finalize_node)
 
     # 進入點改為 analyze (已合併)
     workflow.set_entry_point("analyze")
@@ -343,10 +324,9 @@ def create_graph(bot):
     # 從 Reprompt, Malicious 等節點檢查警告次數，判斷是否進入 Hold
     workflow.add_conditional_edges("reprompt", route_warning_check)     
     workflow.add_conditional_edges("malicious", route_warning_check)    
-    workflow.add_conditional_edges("next_question", route_warning_check)
+    workflow.add_edge("next_question", END)
 
     workflow.add_edge("hold", END)
-    workflow.add_edge("finalize", END)
 
     memory = InMemorySaver()
     return workflow.compile(checkpointer=memory)

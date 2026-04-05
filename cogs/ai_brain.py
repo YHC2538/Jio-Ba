@@ -53,9 +53,8 @@ google.genai.errors.APIError._get_message = safe_get_message
 class AIBrain(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Initialize the graph
-        # Note: We need to ensure the graph is created with the bot instance for tools
-        self.graph = create_graph(bot)
+        # Initialize the interview graph
+        self.graph = create_graph()
         
         # Per-user processing state.
         # queue_key format: "{event_id}:{user_id}"
