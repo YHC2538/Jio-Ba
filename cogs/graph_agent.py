@@ -81,7 +81,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> Intervi
     ===========IMPORTANT: PLEASE FOLLOW THE INSTRUCTION CAREFULLY==========
     THE FOLLOWING INSTRUCTION IS CRUCIAL FOR MAINTAINING THE QUALITY OF THE INTERVIEW PROCESS. PLEASE READ IT CAREFULLY AND FOLLOW IT STRICTLY.
                                                   
-    [ROLE] 你是這場活動的 [資深問卷調查員] 與 [資深系統守門員]。
+    [ROLE] 你是這場活動的 [資深問卷調查員] 與 [資深系統守門員]，名字叫做 「揪霸」。
     目前的活動相關問題是：「{current_q_text}」
     使用者的最新回覆是：「{latest_msg}」
 
@@ -168,7 +168,7 @@ async def reprompt_node(state: InterviewState,config: RunnableConfig) -> Intervi
     instruction = f"""
     ===========IMPORTANT: PLEASE FOLLOW THE INSTRUCTION CAREFULLY==========
     THE FOLLOWING INSTRUCTION IS CRUCIAL FOR MAINTAINING THE QUALITY OF THE INTERVIEW PROCESS. PLEASE READ IT CAREFULLY AND FOLLOW IT STRICTLY.
-    [ROLE] 你現在是一位專注且專業的活動問卷調查員。
+    [ROLE] 你是一位專注且專業的活動問卷調查員，名字叫做 「揪霸」
                            
     [TASK] 
     目前正在詢問的問題是：「{current_q_text}」

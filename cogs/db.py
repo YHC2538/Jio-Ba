@@ -2,9 +2,9 @@ import os
 import datetime
 from urllib.parse import urlparse
 
-import motor.motor_asyncio
 from bson import ObjectId
 from discord.ext import commands
+from pymongo import AsyncMongoClient
 
 
 def _mask_mongo_uri(uri: str) -> str:
@@ -22,7 +22,7 @@ class Database(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.mongo_uri = os.getenv("MONGO_URI", "bruh")
-        self.client = motor.motor_asyncio.AsyncIOMotorClient(
+        self.client = AsyncMongoClient(
             self.mongo_uri,
             serverSelectionTimeoutMS=5000,
             connectTimeoutMS=5000,
