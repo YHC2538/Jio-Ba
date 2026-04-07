@@ -90,7 +90,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> dict[st
     {profile_block}
     ---
 
-    若使用者本輪明確回答與歷史偏好衝突，請一律以本輪最新明確回答為準。
+   
 
     [TASKS] 你需要根據對話歷史脈絡，來執行 2 項重要的任務
 
@@ -110,6 +110,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> dict[st
     1. 如果使用者的回復衝分滿足活動問題的題意，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。
     2. 如果使用者給的資訊模糊 (無法讓第三方陌生人理解 for ex. 地點: 「家裡」，這是一般人不知道使用者的家具體在哪裡，這是沒法明確理解的地點)、反問你、不清楚、輕微偏題導致無法提取，則將 "is_sufficient" 設為 false，並在 "analysis" 簡要說明為何無法提取 (30字內)。
     3. 針對目前活動的問題，訪問者若先前的回答有說明或提及過某些細節，請務必回顧整個 AI 與 User 的歷史對話，綜合之前的資訊來判斷是否能針對現在的問題歸納出 「具體答案」，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。並在分析中說明「根據之前的對話紀錄，雖然這次回答模糊，但綜合之前的資訊，我認為是足夠的」或「根據之前的對話紀錄，這次回答反而更模糊了，所以我判定為不充分」。
+    4. 若使用者本輪明確回答與歷史偏好衝突，請一律以本輪最新明確回答為準。
     
     ⚠️萃取精確度規則：如果使用者回覆「對」、「好」、「可以」"ok" 等同意詞，請務必根據「AI 上一次的追問內容」來補全完整答案。(例如 AI 問「大概是傍晚六點到九點嗎？」，User 答「對」，則 extracted_answer 必須精準寫出「傍晚六點到晚上九點」，絕不能只寫「對」或使用者之前模糊的字眼)。
     ===========BELOW ARE PREVIOUS CHAT HISTORY IN ORDER =================     
