@@ -4,9 +4,12 @@ from cogs.graph_agent import is_prompt_injection
 from cogs.jio import parse_activity_brief_and_seeds, parse_event_selection
 from cogs.matching.nsw_calculator import (
     CandidatePlan,
+    SEMANTIC_UTILITY_FLOOR,
     UserProfile,
+    rank_candidates_from_matrix,
     rank_candidates,
     utility,
+    utility_breakdown,
 )
 
 
@@ -87,6 +90,40 @@ class TestNSWCalculator(unittest.TestCase):
 
         ranked = rank_candidates(users, candidates, top_k=2)
         self.assertEqual(ranked[0]["candidate"]["what"], "火鍋")
+
+    def test_utility_breakdown_uses_custom_floor(self):
+        user = UserProfile(
+            user_id=1,
+            preferences={"when": "週五晚上", "where": "台北", "what": "聚餐", "how": "平價"},
+            dealbreakers=["辣鍋"],
+            weights={"when": 0.35, "where": 0.3, "what": 0.2, "how": 0.15},
+        )
+        candidate = CandidatePlan(what="辣鍋", where="台北車站", when="週五晚上", budget="平價")
+
+        details = utility_breakdown(user, candidate, dealbreaker_penalty=SEMANTIC_UTILITY_FLOOR)
+        self.assertTrue(details["dealbreaker_hit"])
+        self.assertAlmostEqual(details["overall"], SEMANTIC_UTILITY_FLOOR)
+
+    def test_rank_candidates_from_matrix_tiebreak(self):
+        candidates = [
+            CandidatePlan(what="方案A", where="台北", when="週五", budget="平價"),
+            CandidatePlan(what="方案B", where="台北", when="週六", budget="平價"),
+        ]
+
+        utility_matrix = [
+            [ㄖ
+                {"user_id": 1, "utility": 0.6},
+                {"user_id": 2, "utility": 0.6},
+            ],
+            [
+                {"user_id": 1, "utility": 0.9},
+                {"user_id": 2, "utility": 0.4},
+            ],
+        ]
+
+        ranked = rank_candidates_from_matrix(candidates, utility_matrix, top_k=2)
+        self.assertEqual(ranked[0]["candidate"]["what"], "方案A")
+        self.assertGreater(ranked[0]["nsw_score"], ranked[1]["nsw_score"])
 
 
 if __name__ == "__main__":

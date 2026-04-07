@@ -6,12 +6,20 @@ import json
 import os
 import datetime
 import re
+import time
 from pymongo.errors import PyMongoError
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from bson import ObjectId
-from cogs.matching.nsw_calculator import CandidatePlan, UserProfile, rank_candidates
+from cogs.matching.nsw_calculator import (
+    CandidatePlan,
+    UserProfile,
+    has_dealbreaker,
+    rank_candidates,
+    rank_candidates_from_matrix,
+    utility_breakdown,
+)
 from cogs.profile_memory import (
     build_profile_dealbreakers,
     build_profile_preference_fallback,
@@ -20,6 +28,12 @@ from cogs.profile_memory import (
 
 
 CORE_TOPICS = ["what", "where", "when", "how"]
+NSW_SEMANTIC_UTILITY_FLOOR = 0.05
+NSW_TOP_K = 2
+LLM_CANDIDATE_COUNT = 5
+NSW_PIPELINE_VERSION = "v2_llm_semantic"
+LOADING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+LOADING_INTERVAL_SECONDS = 1.2
 
 
 def _clean_seed_dict(seed_dict) -> dict:
@@ -2404,13 +2418,78 @@ class Jio(commands.Cog):
                 merged[key] = cleaned
         return merged
 
-    async def build_nsw_candidates(self, participants, event_seeds=None):
+    def _build_loading_text(self, phase_label, detail, frame_index, elapsed_seconds):
+        spinner = LOADING_FRAMES[frame_index % len(LOADING_FRAMES)]
+        return (
+            f"{spinner} {phase_label}\n"
+            f"{detail}\n"
+            f"已等待 {max(0, int(elapsed_seconds))} 秒"
+        )
+
+    async def _safe_edit_message(self, message, content):
+        if not message:
+            return
+        try:
+            await message.edit(content=content)
+        except Exception:
+            pass
+
+    async def _run_loading_animation(self, message, phase_label, detail):
+        started_at = time.monotonic()
+        frame_index = 0
+        while True:
+            elapsed = time.monotonic() - started_at
+            content = self._build_loading_text(phase_label, detail, frame_index, elapsed)
+            await self._safe_edit_message(message, content)
+            frame_index += 1
+            await asyncio.sleep(LOADING_INTERVAL_SECONDS)
+
+    def _candidate_from_payload(self, raw_candidate, event_seeds=None):
+        payload = raw_candidate if isinstance(raw_candidate, dict) else {}
+        seeds = event_seeds or {}
+
+        what = str(payload.get("what") or payload.get("activity") or seeds.get("what") or "活動內容待定").strip()
+        where = str(payload.get("where") or payload.get("location") or seeds.get("where") or "地點待定").strip()
+        when = str(payload.get("when") or payload.get("time") or seeds.get("when") or "時間待定").strip()
+        how = str(payload.get("how") or payload.get("budget") or payload.get("execution") or seeds.get("how") or "流程待定").strip()
+
+        return CandidatePlan(what=what, where=where, when=when, budget=how)
+
+    def _candidate_key(self, candidate):
+        return (
+            str(candidate.what or "").strip().lower(),
+            str(candidate.where or "").strip().lower(),
+            str(candidate.when or "").strip().lower(),
+            str(candidate.budget or "").strip().lower(),
+        )
+
+    def _build_cartesian_candidates(self, option_sets, max_per_topic=3):
+        what_options = list(option_sets.get("what", []))[:max_per_topic] or ["活動內容待定"]
+        where_options = list(option_sets.get("where", []))[:max_per_topic] or ["地點待定"]
+        when_options = list(option_sets.get("when", []))[:max_per_topic] or ["時間待定"]
+        how_options = list(option_sets.get("how", []))[:max_per_topic] or ["流程待定"]
+
+        candidates = []
+        for what in what_options:
+            for where in where_options:
+                for when in when_options:
+                    for how in how_options:
+                        candidates.append(CandidatePlan(what=what, where=where, when=when, budget=how))
+        return candidates
+
+    def _clamp_utility_score(self, value, floor=NSW_SEMANTIC_UTILITY_FLOOR):
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = floor
+        numeric = max(floor, numeric)
+        numeric = min(1.0, numeric)
+        return numeric
+
+    async def _build_nsw_users_and_options(self, participants, event_seeds=None):
         db = self.bot.get_cog("Database")
         users = []
-        what_options = set()
-        where_options = set()
-        when_options = set()
-        how_options = set()
+        option_sets = {"what": set(), "where": set(), "when": set(), "how": set()}
 
         for participant in participants:
             if participant.get("status") in ["KICKED", "DECLINED", "FINISHED"]:
@@ -2443,25 +2522,354 @@ class Jio(commands.Cog):
                 )
             )
 
-            what_options.add(preferences.get("core_what") or "活動內容待定")
-            where_options.add(preferences.get("core_where") or "地點待定")
-            when_options.add(preferences.get("core_when") or "時間待定")
-            how_options.add(preferences.get("core_how") or "流程待定")
+            option_sets["what"].add(preferences.get("core_what") or "活動內容待定")
+            option_sets["where"].add(preferences.get("core_where") or "地點待定")
+            option_sets["when"].add(preferences.get("core_when") or "時間待定")
+            option_sets["how"].add(preferences.get("core_how") or "流程待定")
 
+        seeds = event_seeds or {}
+        option_sets["what"].add(str(seeds.get("what") or "").strip() or "活動內容待定")
+        option_sets["where"].add(str(seeds.get("where") or "").strip() or "地點待定")
+        option_sets["when"].add(str(seeds.get("when") or "").strip() or "時間待定")
+        option_sets["how"].add(str(seeds.get("how") or "").strip() or "流程待定")
+
+        return users, option_sets
+
+    async def generate_candidates_with_llm(self, event, users, option_sets, event_seeds=None, candidate_count=LLM_CANDIDATE_COUNT):
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return []
+
+        participant_payload = []
+        for user in users:
+            prefs = user.preferences or {}
+            participant_payload.append(
+                {
+                    "user_id": user.user_id,
+                    "preferences": {
+                        "what": str(prefs.get("core_what") or prefs.get("what") or "").strip(),
+                        "where": str(prefs.get("core_where") or prefs.get("where") or "").strip(),
+                        "when": str(prefs.get("core_when") or prefs.get("when") or "").strip(),
+                        "how": str(prefs.get("core_how") or prefs.get("how") or prefs.get("budget") or "").strip(),
+                    },
+                    "dealbreakers": [str(token).strip() for token in (user.dealbreakers or []) if str(token).strip()][:8],
+                }
+            )
+
+        llm = ChatGoogleGenerativeAI(
+            model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"),
+            google_api_key=api_key,
+            temperature=0.15,
+        )
+
+        system_prompt = """
+你是活動企劃助手。請根據 user 提供的活動參與者偏好與底線 (dealbreakers)，設計可執行、常理合理的候選方案。
+
+只輸出 JSON，格式如下：
+{
+  "candidates": [
+    {"what": "", "where": "", "when": "", "how": ""}
+  ]
+}
+
+規則：
+1) 僅輸出 JSON，不得有額外文字。
+2) candidates 長度固定 5。
+3) 每個候選都必須有 what/where/when/how 且可實際執行。
+4) 優先滿足多數人偏好，同時避免明顯踩到底線。
+5) 五個候選要有差異，不可重複。
+6) 使用繁體中文。
+"""
+        user_prompt = (
+            f"活動標題: {str((event or {}).get('title') or '未命名活動').strip()}\n"
+            f"活動 seeds: {json.dumps(event_seeds or {}, ensure_ascii=False)}\n"
+            f"參與者偏好: {json.dumps(participant_payload, ensure_ascii=False)}\n"
+        )
+
+        try:
+            resp = await _ainvoke_with_system_fallback(
+                llm,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                config={
+                    "run_name": "generate_candidates_with_llm",
+                    "tags": ["jio-ba", "adjudication", "nsw-v2"],
+                },
+            )
+            parsed = _safe_json_parse(getattr(resp, "content", ""))
+        except Exception as err:
+            print(f"[DEBUG][NSW] generate_candidates_with_llm failed: {err}")
+            return []
+
+        raw_candidates = parsed.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return []
+
+        dedup = []
+        seen_keys = set()
+
+        for raw_candidate in raw_candidates:
+            candidate = self._candidate_from_payload(raw_candidate, event_seeds=event_seeds)
+            key = self._candidate_key(candidate)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            dedup.append(candidate)
+            if len(dedup) >= candidate_count:
+                break
+
+        if len(dedup) < candidate_count:
+            fallback = self._build_cartesian_candidates(option_sets)
+            for candidate in fallback:
+                key = self._candidate_key(candidate)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                dedup.append(candidate)
+                if len(dedup) >= candidate_count:
+                    break
+
+        return dedup[:candidate_count]
+
+    def _build_fallback_semantic_utility_matrix(self, users, candidates):
+        matrix = []
+        for candidate in candidates:
+            row = []
+            for user in users:
+                details = utility_breakdown(
+                    user,
+                    candidate,
+                    dealbreaker_penalty=NSW_SEMANTIC_UTILITY_FLOOR,
+                )
+                row.append(
+                    {
+                        "user_id": user.user_id,
+                        "utility": float(details.get("overall", NSW_SEMANTIC_UTILITY_FLOOR)),
+                        "dimensions": details.get("dimensions", {}),
+                        "dealbreaker_hit": bool(details.get("dealbreaker_hit")),
+                        "reason": "fallback_keyword_scoring",
+                    }
+                )
+            matrix.append(row)
+        return matrix
+
+    async def build_semantic_utility_matrix(self, event, users, candidates):
+        if not users or not candidates:
+            return []
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return self._build_fallback_semantic_utility_matrix(users, candidates)
+
+        llm = ChatGoogleGenerativeAI(
+            model=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash"),
+            google_api_key=api_key,
+            temperature=0.1,
+        )
+
+        user_payload = []
+        for user in users:
+            prefs = user.preferences or {}
+            user_payload.append(
+                {
+                    "user_id": user.user_id,
+                    "preferences": {
+                        "what": str(prefs.get("core_what") or prefs.get("what") or "").strip(),
+                        "where": str(prefs.get("core_where") or prefs.get("where") or "").strip(),
+                        "when": str(prefs.get("core_when") or prefs.get("when") or "").strip(),
+                        "how": str(prefs.get("core_how") or prefs.get("how") or prefs.get("budget") or "").strip(),
+                    },
+                    "dealbreakers": [str(token).strip() for token in (user.dealbreakers or []) if str(token).strip()][:8],
+                }
+            )
+
+        candidate_payload = []
+        for idx, candidate in enumerate(candidates, start=1):
+            candidate_payload.append(
+                {
+                    "candidate_index": idx,
+                    "what": candidate.what,
+                    "where": candidate.where,
+                    "when": candidate.when,
+                    "how": candidate.budget,
+                }
+            )
+
+        system_prompt = """
+你是活動偏好評分模型。請根據使用者偏好與候選方案，輸出每位使用者對每個候選的效用分數。
+
+只輸出 JSON，格式如下：
+{
+  "scores": [
+    {
+      "user_id": 123,
+      "items": [
+        {
+          "candidate_index": 1,
+          "overall": 0.73,
+          "dimensions": {"what": 0.8, "where": 0.7, "when": 0.6, "how": 0.75},
+          "dealbreaker_hit": false,
+          "reason": "一句話理由"
+        }
+      ]
+    }
+  ]
+}
+
+規則：
+1) overall 與每個 dimensions 分數都必須在 0.05 到 1.0。
+2) 命中 dealbreaker 時，overall 與所有 dimensions 都填 0.05。
+3) reason 簡短，最多 30 字。
+4) 只輸出 JSON，不要 markdown。
+"""
+        user_prompt = (
+            f"活動標題: {str((event or {}).get('title') or '未命名活動').strip()}\n"
+            f"使用者偏好: {json.dumps(user_payload, ensure_ascii=False)}\n"
+            f"候選方案: {json.dumps(candidate_payload, ensure_ascii=False)}"
+        )
+
+        fallback_matrix = self._build_fallback_semantic_utility_matrix(users, candidates)
+
+        try:
+            resp = await _ainvoke_with_system_fallback(
+                llm,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                config={
+                    "run_name": "semantic_utility_matrix",
+                    "tags": ["jio-ba", "adjudication", "nsw-v2"],
+                },
+            )
+            parsed = _safe_json_parse(getattr(resp, "content", ""))
+        except Exception as err:
+            print(f"[DEBUG][NSW] build_semantic_utility_matrix failed: {err}")
+            return fallback_matrix
+
+        raw_scores = parsed.get("scores")
+        if not isinstance(raw_scores, list):
+            return fallback_matrix
+
+        by_user_and_candidate = {}
+        for user_row in raw_scores:
+            if not isinstance(user_row, dict):
+                continue
+            try:
+                row_user_id = int(user_row.get("user_id"))
+            except Exception:
+                continue
+
+            for item in user_row.get("items", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    candidate_index = int(item.get("candidate_index"))
+                except Exception:
+                    continue
+                if candidate_index < 1:
+                    continue
+
+                by_user_and_candidate[(row_user_id, candidate_index - 1)] = item
+
+        final_matrix = []
+        for candidate_idx, candidate in enumerate(candidates):
+            row = []
+            for user_idx, user in enumerate(users):
+                fallback_entry = fallback_matrix[candidate_idx][user_idx]
+                llm_item = by_user_and_candidate.get((int(user.user_id), candidate_idx), {})
+                dimensions_payload = llm_item.get("dimensions") if isinstance(llm_item, dict) else {}
+                dimensions_payload = dimensions_payload if isinstance(dimensions_payload, dict) else {}
+
+                forced_dealbreaker = has_dealbreaker(candidate, user.dealbreakers)
+                if forced_dealbreaker:
+                    row.append(
+                        {
+                            "user_id": user.user_id,
+                            "utility": NSW_SEMANTIC_UTILITY_FLOOR,
+                            "dimensions": {
+                                "what": NSW_SEMANTIC_UTILITY_FLOOR,
+                                "where": NSW_SEMANTIC_UTILITY_FLOOR,
+                                "when": NSW_SEMANTIC_UTILITY_FLOOR,
+                                "how": NSW_SEMANTIC_UTILITY_FLOOR,
+                            },
+                            "dealbreaker_hit": True,
+                            "reason": "dealbreaker_hard_penalty",
+                        }
+                    )
+                    continue
+
+                dimensions = {
+                    "what": self._clamp_utility_score(dimensions_payload.get("what"), floor=NSW_SEMANTIC_UTILITY_FLOOR),
+                    "where": self._clamp_utility_score(dimensions_payload.get("where"), floor=NSW_SEMANTIC_UTILITY_FLOOR),
+                    "when": self._clamp_utility_score(dimensions_payload.get("when"), floor=NSW_SEMANTIC_UTILITY_FLOOR),
+                    "how": self._clamp_utility_score(dimensions_payload.get("how"), floor=NSW_SEMANTIC_UTILITY_FLOOR),
+                }
+                overall = self._clamp_utility_score(llm_item.get("overall"), floor=NSW_SEMANTIC_UTILITY_FLOOR)
+                llm_dealbreaker_hit = bool(llm_item.get("dealbreaker_hit"))
+                if llm_dealbreaker_hit:
+                    overall = NSW_SEMANTIC_UTILITY_FLOOR
+                    dimensions = {
+                        "what": NSW_SEMANTIC_UTILITY_FLOOR,
+                        "where": NSW_SEMANTIC_UTILITY_FLOOR,
+                        "when": NSW_SEMANTIC_UTILITY_FLOOR,
+                        "how": NSW_SEMANTIC_UTILITY_FLOOR,
+                    }
+                reason = str(llm_item.get("reason") or "").strip()[:80]
+
+                if not reason:
+                    reason = str(fallback_entry.get("reason") or "").strip() or "semantic_scoring"
+
+                row.append(
+                    {
+                        "user_id": user.user_id,
+                        "utility": overall,
+                        "dimensions": dimensions,
+                        "dealbreaker_hit": llm_dealbreaker_hit,
+                        "reason": reason,
+                    }
+                )
+
+            final_matrix.append(row)
+
+        return final_matrix
+
+    async def build_nsw_candidates(self, participants, event_seeds=None, event=None, progress_callback=None):
+        users, option_sets = await self._build_nsw_users_and_options(participants, event_seeds=event_seeds)
         if not users:
             return []
 
-        candidates = []
-        for what in list(what_options)[:3]:
-            for where in list(where_options)[:3]:
-                for when in list(when_options)[:3]:
-                    for how in list(how_options)[:3]:
-                        candidates.append(CandidatePlan(what=what, where=where, when=when, budget=how))
+        if progress_callback:
+            await progress_callback("phase1_candidates", "start", {"users": len(users)})
+
+        candidates = await self.generate_candidates_with_llm(
+            event,
+            users,
+            option_sets,
+            event_seeds=event_seeds,
+            candidate_count=LLM_CANDIDATE_COUNT,
+        )
+
+        if not candidates:
+            candidates = self._build_cartesian_candidates(option_sets)
+
+        if progress_callback:
+            await progress_callback("phase1_candidates", "end", {"candidate_count": len(candidates)})
 
         if not candidates:
             return []
 
-        return rank_candidates(users, candidates, top_k=2)
+        if progress_callback:
+            await progress_callback("phase2_utility", "start", {"candidate_count": len(candidates)})
+
+        utility_matrix = await self.build_semantic_utility_matrix(event, users, candidates)
+        if progress_callback:
+            await progress_callback("phase2_utility", "end", {"matrix_rows": len(utility_matrix)})
+
+        if utility_matrix:
+            ranked = rank_candidates_from_matrix(candidates, utility_matrix, top_k=NSW_TOP_K)
+            if ranked:
+                return ranked
+
+        return rank_candidates(users, candidates, top_k=NSW_TOP_K)
 
     def _is_flagged_private_note(self, note: str) -> bool:
         lowered = str(note or "").lower()
@@ -2513,24 +2921,7 @@ class Jio(commands.Cog):
         if not event:
             return
 
-        event_seeds = event.get("activity_seeds", {}) or {}
-        candidates = await self.build_nsw_candidates(event.get("participants", []), event_seeds=event_seeds)
-        if not candidates:
-            return
-
-        await db.events.update_one(
-            {"_id": event_id},
-            {
-                "$set": {
-                    "adjudication_candidates": candidates,
-                    "adjudication_status": "AWAITING_HOST_CHOICE"
-                }
-            }
-        )
-
         initiator_id = event.get("initiator_id")
-        await db.set_focus_event(initiator_id, str(event_id), status="INTERVIEWING")
-
         user = self.bot.get_user(initiator_id)
         if not user:
             try:
@@ -2541,7 +2932,119 @@ class Jio(commands.Cog):
         if not user:
             return
 
+        progress_message = None
+        animation_task = None
+
+        phase_labels = {
+            "phase1_candidates": "Phase 1/2 候選方案生成中",
+            "phase2_utility": "Phase 2/2 效用矩陣計算中",
+        }
+        phase_details = {
+            "phase1_candidates": "AI 正在整合所有參與者偏好，產生 5 個候選方案...",
+            "phase2_utility": "AI 正在評估每位參與者對每個候選的滿意度...",
+        }
+
+        async def _stop_animation(final_content=None):
+            nonlocal animation_task
+            if animation_task and not animation_task.done():
+                animation_task.cancel()
+                try:
+                    await animation_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            animation_task = None
+            if final_content and progress_message:
+                await self._safe_edit_message(progress_message, final_content)
+
+        async def _progress_callback(phase, status, meta=None):
+            nonlocal animation_task
+            label = phase_labels.get(phase, "裁決流程執行中")
+            detail = phase_details.get(phase, "系統正在計算，請稍候...")
+            if status == "start":
+                await _stop_animation()
+                if progress_message:
+                    animation_task = self.bot.loop.create_task(
+                        self._run_loading_animation(progress_message, label, detail)
+                    )
+                return
+
+            if status == "end":
+                suffix = ""
+                if phase == "phase1_candidates":
+                    candidate_count = int((meta or {}).get("candidate_count") or 0)
+                    suffix = f"（產生 {candidate_count} 個候選）"
+                await _stop_animation(f"✅ {label} 完成 {suffix}".strip())
+
+        try:
+            progress_message = await user.send(
+                "⏳ 已收到所有訪談結果，正在準備裁決分析..."
+            )
+        except Exception:
+            progress_message = None
+
+        event_seeds = event.get("activity_seeds", {}) or {}
+        try:
+            candidates = await self.build_nsw_candidates(
+                event.get("participants", []),
+                event_seeds=event_seeds,
+                event=event,
+                progress_callback=_progress_callback if progress_message else None,
+            )
+        except Exception as err:
+            await _stop_animation("⚠️ 裁決分析失敗，請稍後再試。")
+            print(f"[DEBUG][NSW] send_adjudication_report failed while building candidates: {err}")
+            return
+
+        await _stop_animation("✅ 裁決分析完成，正在整理幕僚報告...")
+        if not candidates:
+            await self._safe_edit_message(progress_message, "⚠️ 未產生有效候選方案，請稍後再試。")
+            return
+
+        await db.events.update_one(
+            {"_id": event_id},
+            {
+                "$set": {
+                    "adjudication_candidates": candidates,
+                    "adjudication_status": "AWAITING_HOST_CHOICE",
+                    "nsw_version": NSW_PIPELINE_VERSION,
+                    "nsw_config": {
+                        "utility_floor": NSW_SEMANTIC_UTILITY_FLOOR,
+                        "dealbreaker_policy": "hard_penalty",
+                        "candidate_count": LLM_CANDIDATE_COUNT,
+                        "top_k": NSW_TOP_K,
+                    },
+                    "utility_matrix_snapshot": [
+                        {
+                            "candidate": item.get("candidate", {}),
+                            "per_user_utility": item.get("per_user_utility", []),
+                            "nsw_score": item.get("nsw_score", 0.0),
+                        }
+                        for item in candidates
+                    ],
+                }
+            }
+        )
+
+        await db.set_focus_event(initiator_id, str(event_id), status="INTERVIEWING")
+
         report_lines = []
+        utility_map_by_user = {}
+        for rank_index, candidate in enumerate(candidates, start=1):
+            for user_item in candidate.get("per_user_utility", []) or []:
+                uid = user_item.get("user_id")
+                if uid is None:
+                    continue
+                utility_map_by_user.setdefault(uid, []).append(
+                    {
+                        "rank": rank_index,
+                        "utility": float(user_item.get("utility", NSW_SEMANTIC_UTILITY_FLOOR) or NSW_SEMANTIC_UTILITY_FLOOR),
+                        "dimensions": user_item.get("dimensions", {}) or {},
+                        "dealbreaker_hit": bool(user_item.get("dealbreaker_hit")),
+                        "reason": str(user_item.get("reason") or "").strip(),
+                    }
+                )
 
         questions = event.get("interview_questions", []) or []
         for participant in event.get("participants", []):
@@ -2574,6 +3077,26 @@ class Jio(commands.Cog):
             report_lines.append(f"   - When: {str(answers.get('core_when') or '時間待定')}")
             report_lines.append(f"   - How: {str(answers.get('core_how') or '流程待定')}")
 
+            predicted = utility_map_by_user.get(uid, [])
+            if predicted:
+                report_lines.append("   預測滿意度（Top-2）:")
+                for item in predicted[:NSW_TOP_K]:
+                    dims = item.get("dimensions", {}) or {}
+                    report_lines.append(
+                        (
+                            f"   - 方案{item.get('rank')}: 總分 {item.get('utility', NSW_SEMANTIC_UTILITY_FLOOR):.3f} | "
+                            f"W:{float(dims.get('what', NSW_SEMANTIC_UTILITY_FLOOR)):.2f} "
+                            f"R:{float(dims.get('where', NSW_SEMANTIC_UTILITY_FLOOR)):.2f} "
+                            f"T:{float(dims.get('when', NSW_SEMANTIC_UTILITY_FLOOR)):.2f} "
+                            f"H:{float(dims.get('how', NSW_SEMANTIC_UTILITY_FLOOR)):.2f}"
+                        )
+                    )
+                    if item.get("dealbreaker_hit"):
+                        report_lines.append("     ⚠️ 命中底線，已施加硬懲罰")
+                    reason = str(item.get("reason") or "").strip()
+                    if reason:
+                        report_lines.append(f"     理由: {reason}")
+
             public_notes = notes.get("public", []) or []
             if public_notes:
                 report_lines.append("   Public notes:")
@@ -2592,8 +3115,14 @@ class Jio(commands.Cog):
         report_lines.append("🏁 NSW 候選方案")
         for index, candidate in enumerate(candidates, start=1):
             item = candidate.get("candidate", {})
+            nsw_score = float(candidate.get("nsw_score", 0.0) or 0.0)
+            min_utility = float(candidate.get("min_utility", NSW_SEMANTIC_UTILITY_FLOOR) or NSW_SEMANTIC_UTILITY_FLOOR)
+            avg_utility = float(candidate.get("avg_utility", NSW_SEMANTIC_UTILITY_FLOOR) or NSW_SEMANTIC_UTILITY_FLOOR)
             report_lines.append(
-                f"方案 {index}: {item.get('what')} / {item.get('where')} / {item.get('when')} / 執行方式 {item.get('budget')}"
+                (
+                    f"方案 {index}: {item.get('what')} / {item.get('where')} / {item.get('when')} / 執行方式 {item.get('budget')}\n"
+                    f"  NSW={nsw_score:.5f}, min_u={min_utility:.3f}, avg_u={avg_utility:.3f}"
+                )
             )
 
         report_text = "\n".join(report_lines).strip()
@@ -2609,12 +3138,15 @@ class Jio(commands.Cog):
         choice_lines = []
         for index, candidate in enumerate(candidates, start=1):
             item = candidate.get("candidate", {})
+            nsw_score = float(candidate.get("nsw_score", 0.0) or 0.0)
+            min_utility = float(candidate.get("min_utility", NSW_SEMANTIC_UTILITY_FLOOR) or NSW_SEMANTIC_UTILITY_FLOOR)
             choice_lines.append(
                 f"**方案 {index}**\n"
                 f"What: {item.get('what') or '待定'}\n"
                 f"Where: {item.get('where') or '待定'}\n"
                 f"When: {item.get('when') or '待定'}\n"
-                f"How: {item.get('how') or item.get('budget') or '待定'}"
+                f"How: {item.get('how') or item.get('budget') or '待定'}\n"
+                f"NSW: {nsw_score:.5f} | 最低個體滿意度: {min_utility:.3f}"
             )
 
         choice_embed = discord.Embed(
@@ -2626,6 +3158,8 @@ class Jio(commands.Cog):
         view = AdjudicationView(self.bot, event_id)
         await user.send(embed=report_embed)
         choice_message = await user.send(embed=choice_embed, view=view)
+
+        await self._safe_edit_message(progress_message, "✅ 幕僚報告已送達，請查看並選擇最終方案。")
 
         await db.events.update_one(
             {"_id": event_id},
