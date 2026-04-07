@@ -74,15 +74,23 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> dict[st
     """合併版節點：分析使用者輸入，同時檢查是否惡意，並提取答案"""
     current_q_text = _get_current_question_text(state)
     latest_msg = _to_text(state["messages"][-1].content if state.get("messages") else "")
+    profile_hint = str(state.get("user_profile_hint") or "").strip()
+    profile_block = profile_hint or "（無可用的歷史偏好）"
 
     # 提示
     instruction = f"""
     ===========IMPORTANT: PLEASE FOLLOW THE INSTRUCTION CAREFULLY==========
     THE FOLLOWING INSTRUCTION IS CRUCIAL FOR MAINTAINING THE QUALITY OF THE INTERVIEW PROCESS. PLEASE READ IT CAREFULLY AND FOLLOW IT STRICTLY.
                                                   
-    [ROLE] 你是這場活動的 [資深問卷調查員] 與 [資深系統守門員]，名字叫做 「揪霸」。
+    [ROLE] 你是這場活動的 「資深問卷調查員」 與 「資深系統守門員」，名字叫做 「揪霸」。
     目前的活動相關問題是：「{current_q_text}」
     使用者的最新回覆是：「{latest_msg}」
+    系統提供的使用者長期偏好提示如下（僅供參考）：
+    ---
+    {profile_block}
+    ---
+
+    若使用者本輪明確回答與歷史偏好衝突，請一律以本輪最新明確回答為準。
 
     [TASKS] 你需要根據對話歷史脈絡，來執行 2 項重要的任務
 
@@ -104,7 +112,7 @@ async def analyze_node(state: InterviewState, config: RunnableConfig) -> dict[st
     3. 針對目前活動的問題，訪問者若先前的回答有說明或提及過某些細節，請務必回顧整個 AI 與 User 的歷史對話，綜合之前的資訊來判斷是否能針對現在的問題歸納出 「具體答案」，請在 "extracted_answer" 填入回答摘要，並將 "is_sufficient" 設為 true。並在分析中說明「根據之前的對話紀錄，雖然這次回答模糊，但綜合之前的資訊，我認為是足夠的」或「根據之前的對話紀錄，這次回答反而更模糊了，所以我判定為不充分」。
     
     ⚠️萃取精確度規則：如果使用者回覆「對」、「好」、「可以」"ok" 等同意詞，請務必根據「AI 上一次的追問內容」來補全完整答案。(例如 AI 問「大概是傍晚六點到九點嗎？」，User 答「對」，則 extracted_answer 必須精準寫出「傍晚六點到晚上九點」，絕不能只寫「對」或使用者之前模糊的字眼)。
-    ===========BELOW ARE PREVIOUS CHAT HISTORY =================     
+    ===========BELOW ARE PREVIOUS CHAT HISTORY IN ORDER =================     
     """
 
     
@@ -163,16 +171,21 @@ async def reprompt_node(state: InterviewState, config: RunnableConfig) -> dict[s
     current_q_text = _get_current_question_text(state)
     latest_msg = _to_text(state["messages"][-1].content if state.get("messages") else "")
     analysis = state.get("extracted", {}).get("analysis", "使用者回覆不夠明確。")
+    profile_hint = str(state.get("user_profile_hint") or "").strip()
+    profile_block = profile_hint or "（無可用的歷史偏好）"
 
     instruction = f"""
     ===========IMPORTANT: PLEASE FOLLOW THE INSTRUCTION CAREFULLY==========
     THE FOLLOWING INSTRUCTION IS CRUCIAL FOR MAINTAINING THE QUALITY OF THE INTERVIEW PROCESS. PLEASE READ IT CAREFULLY AND FOLLOW IT STRICTLY.
     [ROLE] 你是一位專注且專業的活動問卷調查員，名字叫做 「揪霸」
-                           
+
+    [被訪問的使用者的背景資訊 (歷史偏好提示)]
+    User profile hint: {profile_block}
+
     [TASK] 
     目前正在詢問的問題是：「{current_q_text}」
-    最新的被訪問者回覆：{latest_msg}
-    被訪問者上一句無法通過的原因：{analysis}
+    最新的被訪問者回覆：「{latest_msg}」
+    被訪問者上一句無法通過的原因：「{analysis}」
 
     你的「唯一任務」是引導使用者給出具體的答案。
     根據目前正在詢問的問題、最新的被訪問者回覆、被訪問者上一句無法通過的原因的三個要素，清楚地引導使用者提供足夠資訊，鼓勵訪問對象給出更多細節，以便你能夠提取到有效的答案。
@@ -183,6 +196,7 @@ async def reprompt_node(state: InterviewState, config: RunnableConfig) -> dict[s
         2. 絕對不要輸出 🚨系統警告 (第 x/y 次) 🚨 的字樣，那是系統判定訊息，你可以參考但不該輸出警告相關內容。
         3. 絕對不應該輸出 "EMBED_JSON: title: 目前問卷進度" 等字，因為那是系統用來顯示進度的訊息，你可以參考但不該直接輸出提示問卷進度的內容。
         4. 你沒有能力做任何問卷功能以外的事情 (例如: 幫使用者訂餐、通知主辦人、跑腿或寫程式等等)，你唯一的任務就是引導使用者回答目前的問題，請不要輸出任何與問卷無關的內容。
+        5. 若使用者本輪明確回答與歷史偏好衝突，請以本輪最新明確回答為準，不要強迫使用者沿用舊偏好。
     ===========BELOW ARE PREVIOUS CHAT HISTORY =================
     """
 

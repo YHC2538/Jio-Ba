@@ -158,6 +158,18 @@ wheels = [
 ]
 
 [[package]]
+name = "click"
+version = "8.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/75/31212c6bf2503fdf920d87fee5d7a86a2e3bcf444984126f13d8e4016804/click-8.3.2.tar.gz", hash = "sha256:14162b8b3b3550a7d479eafa77dfd3c38d9dc8951f6f69c78913a8f9a7540fd5", size = 302856, upload-time = "2026-04-03T19:14:45.118Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/20/71885d8b97d4f3dde17b1fdb92dbd4908b00541c5a3379787137285f602e/click-8.3.2-py3-none-any.whl", hash = "sha256:1924d2c27c5653561cd2cae4548d1406039cb79b858b747cfea24924bbc1616d", size = 108379, upload-time = "2026-04-03T19:14:43.505Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -400,6 +412,7 @@ dependencies = [
     { name = "langchain-google-genai" },
     { name = "langchain-openai" },
     { name = "langgraph" },
+    { name = "langgraph-cli" },
     { name = "langsmith" },
     { name = "py-cord" },
     { name = "pycord" },
@@ -415,6 +428,7 @@ requires-dist = [
     { name = "langchain-google-genai", specifier = ">=4.2.1" },
     { name = "langchain-openai", specifier = ">=1.1.12" },
     { name = "langgraph", specifier = ">=1.1.3" },
+    { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.19" },
     { name = "langsmith", specifier = ">=0.7.22" },
     { name = "py-cord", specifier = ">=2.7.1" },
     { name = "pycord", specifier = ">=0.1.1" },
@@ -554,6 +568,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/44/a8df45d1e8b4637e29789fa8bae1db022c953cc7ac80093cfc52e923547e/langgraph_checkpoint-4.0.1.tar.gz", hash = "sha256:b433123735df11ade28829e40ce25b9be614930cd50245ff2af60629234befd9", size = 158135, upload-time = "2026-02-27T21:06:16.092Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/65/4c/09a4a0c42f5d2fc38d6c4d67884788eff7fd2cfdf367fdf7033de908b4c0/langgraph_checkpoint-4.0.1-py3-none-any.whl", hash = "sha256:e3adcd7a0e0166f3b48b8cf508ce0ea366e7420b5a73aa81289888727769b034", size = 50453, upload-time = "2026-02-27T21:06:14.293Z" },
+]
+
+[[package]]
+name = "langgraph-cli"
+version = "0.4.19"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "httpx" },
+    { name = "python-dotenv" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/4e/4c2dbc23e63ffbbe4cb5e5df3196bc65fc2f01bf645f09b2e4fbbbc30d94/langgraph_cli-0.4.19.tar.gz", hash = "sha256:99b79568a8fe829c296ed0aaa4a4570dc16e1d328cb2f3c629c9415edd6020b5", size = 879498, upload-time = "2026-03-20T22:12:20.304Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/e1/5b06b1f9f49d5d9e4568e3cc4f27f7268f1c89051dacb2f157c2433df7d0/langgraph_cli-0.4.19-py3-none-any.whl", hash = "sha256:ed3df28460dcf0bba12728be23c17a62a9df6fbfeb7a6940936fd5f180695310", size = 56297, upload-time = "2026-03-20T22:12:18.796Z" },
 ]
 
 [[package]]

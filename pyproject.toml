@@ -16,4 +16,5 @@ dependencies = [
     "pycord>=0.1.1",
     "python-dotenv>=1.2.2",
     "rich>=14.3.3",
+    "langgraph-cli[inmem]>=0.4.19",
 ]

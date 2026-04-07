@@ -97,10 +97,11 @@ def get_dinner_tools(bot):
             return f"DB Update Error: {e}"
 
     @tool
-    async def search_restaurant(query: str, location: str):
+    async def search_restaurant(query: str, location: str, profile_context: str = ""):
         """
         Search for restaurant information from the web using AI with Google Search.
         Use this to find specific places, recommendations, or check operating hours/prices.
+        profile_context can include user preference hints (dietary limits, budget, time constraints).
         """
         try:
             import os
@@ -128,10 +129,11 @@ def get_dinner_tools(bot):
             Please help me find restaurant information.
             Query: {query}
             Location: {location}
+            User Preference Context: {str(profile_context or '').strip() or 'N/A'}
             
             Conditions:
             1. Recommend specific restaurants matching the query.
-            2. If specific conditions are provided in the query (e.g. price, type), respect them.
+            2. If specific conditions are provided in the query or preference context (e.g. dietary limits, price, type), respect them.
             3. OUTPUT FORMAT: PURE JSON ONLY. No markdown, no intro.
             
             JSON Structure:

@@ -6,6 +6,16 @@ from bson import ObjectId
 from discord.ext import commands
 from pymongo import AsyncMongoClient
 
+from .profile_memory import (
+    PROFILE_EVENT_HISTORY_LIMIT,
+    PROFILE_MAX_ITEMS,
+    build_empty_profile,
+    build_empty_profile_meta,
+    merge_profiles,
+    normalize_profile_update,
+    profile_hint_text,
+)
+
 
 def _mask_mongo_uri(uri: str) -> str:
     if not uri:
@@ -36,6 +46,146 @@ class Database(commands.Cog):
     async def get_user(self, user_id):
         return await self.users.find_one({"_id": user_id})
 
+    def _profile_has_values(self, profile: dict) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        for section in profile.values():
+            if not isinstance(section, dict):
+                continue
+            for items in section.values():
+                if isinstance(items, list) and items:
+                    return True
+        return False
+
+    async def get_user_profile(self, user_id):
+        user = await self.migrate_active_event_if_needed(user_id)
+        if not user:
+            await self.create_user(user_id)
+            user = await self.get_user(user_id)
+
+        current_profile = (user or {}).get("profile") or {}
+        return merge_profiles(build_empty_profile(), current_profile, max_items=PROFILE_MAX_ITEMS)
+
+    async def get_user_profile_hint(self, user_id, max_items_per_bucket=3):
+        profile = await self.get_user_profile(user_id)
+        return profile_hint_text(profile, max_items_per_bucket=max_items_per_bucket)
+
+    async def is_profile_event_processed(self, user_id, event_id):
+        normalized_event_id = str(event_id or "").strip()
+        if not normalized_event_id:
+            return False
+        user = await self.users.find_one(
+            {
+                "_id": user_id,
+                "profile_meta.processed_event_ids": normalized_event_id,
+            },
+            {"_id": 1},
+        )
+        return bool(user)
+
+    async def mark_profile_event_processed(self, user_id, event_id):
+        normalized_event_id = str(event_id or "").strip()
+        if not normalized_event_id:
+            return False
+
+        await self.create_user(user_id)
+        now = datetime.datetime.utcnow()
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$addToSet": {"profile_meta.processed_event_ids": normalized_event_id},
+                "$set": {
+                    "profile_meta.last_updated_at": now,
+                },
+            },
+            upsert=True,
+        )
+
+        user = await self.get_user(user_id)
+        processed = list((((user or {}).get("profile_meta") or {}).get("processed_event_ids") or []))
+        if len(processed) > PROFILE_EVENT_HISTORY_LIMIT:
+            await self.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "profile_meta.processed_event_ids": processed[-PROFILE_EVENT_HISTORY_LIMIT:],
+                    }
+                },
+            )
+        return True
+
+    async def merge_user_profile(self, user_id, profile_update, source_event_id=None):
+        normalized_update = normalize_profile_update(profile_update, max_items=PROFILE_MAX_ITEMS)
+        normalized_event_id = str(source_event_id or "").strip() if source_event_id is not None else ""
+
+        await self.create_user(user_id)
+        if normalized_event_id and await self.is_profile_event_processed(user_id, normalized_event_id):
+            return False
+
+        add_to_set = {}
+        for section, section_payload in normalized_update.items():
+            if not isinstance(section_payload, dict):
+                continue
+            for bucket, items in section_payload.items():
+                if items:
+                    add_to_set[f"profile.{section}.{bucket}"] = {"$each": items}
+
+        if normalized_event_id:
+            add_to_set["profile_meta.processed_event_ids"] = normalized_event_id
+
+        now = datetime.datetime.utcnow()
+        update_doc = {
+            "$set": {
+                "profile_meta.version": 1,
+                "profile_meta.last_updated_at": now,
+                "profile_meta.last_error": None,
+            },
+        }
+        if add_to_set:
+            update_doc["$addToSet"] = add_to_set
+
+        await self.users.update_one({"_id": user_id}, update_doc, upsert=True)
+
+        # Keep profile arrays and processed events bounded to prevent unbounded growth.
+        user = await self.get_user(user_id)
+        merged_profile = merge_profiles(
+            build_empty_profile(),
+            ((user or {}).get("profile") or {}),
+            max_items=PROFILE_MAX_ITEMS,
+        )
+        processed_ids = list((((user or {}).get("profile_meta") or {}).get("processed_event_ids") or []))
+        if len(processed_ids) > PROFILE_EVENT_HISTORY_LIMIT:
+            processed_ids = processed_ids[-PROFILE_EVENT_HISTORY_LIMIT:]
+
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "profile": merged_profile,
+                    "profile_meta.processed_event_ids": processed_ids,
+                    "profile_meta.version": 1,
+                    "profile_meta.last_updated_at": now,
+                }
+            },
+        )
+        return self._profile_has_values(normalized_update) or bool(normalized_event_id)
+
+    async def record_profile_error(self, user_id, event_id, error_message):
+        await self.create_user(user_id)
+        await self.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "profile_meta.last_error": {
+                        "event_id": str(event_id or ""),
+                        "message": str(error_message or "")[:500],
+                        "at": datetime.datetime.utcnow(),
+                    }
+                }
+            },
+            upsert=True,
+        )
+
     async def create_user(self, user_id):
         await self.users.update_one(
             {"_id": user_id},
@@ -45,6 +195,8 @@ class Database(commands.Cog):
                     "ping_allowed": True,
                     "participating_events": [],
                     "focus_event_id": None,
+                    "profile": build_empty_profile(),
+                    "profile_meta": build_empty_profile_meta(),
                 }
             },
             upsert=True
@@ -128,6 +280,8 @@ class Database(commands.Cog):
                     "$setOnInsert": {
                         "strikes": 0,
                         "ping_allowed": True,
+                        "profile": build_empty_profile(),
+                        "profile_meta": build_empty_profile_meta(),
                     },
                 },
                 upsert=True,
@@ -165,6 +319,8 @@ class Database(commands.Cog):
                 "$setOnInsert": {
                     "strikes": 0,
                     "ping_allowed": True,
+                    "profile": build_empty_profile(),
+                    "profile_meta": build_empty_profile_meta(),
                 },
             },
             upsert=True,
@@ -201,6 +357,8 @@ class Database(commands.Cog):
                 "$setOnInsert": {
                     "strikes": 0,
                     "ping_allowed": True,
+                    "profile": build_empty_profile(),
+                    "profile_meta": build_empty_profile_meta(),
                 },
             },
             upsert=True,
@@ -234,6 +392,8 @@ class Database(commands.Cog):
                 "$setOnInsert": {
                     "strikes": 0,
                     "ping_allowed": True,
+                    "profile": build_empty_profile(),
+                    "profile_meta": build_empty_profile_meta(),
                 },
             },
             upsert=True,
@@ -268,6 +428,8 @@ class Database(commands.Cog):
                     "$setOnInsert": {
                         "strikes": 0,
                         "ping_allowed": True,
+                        "profile": build_empty_profile(),
+                        "profile_meta": build_empty_profile_meta(),
                     },
                 },
                 upsert=True,
@@ -282,6 +444,8 @@ class Database(commands.Cog):
                 "$setOnInsert": {
                     "strikes": 0,
                     "ping_allowed": True,
+                    "profile": build_empty_profile(),
+                    "profile_meta": build_empty_profile_meta(),
                 },
             },
             upsert=True,

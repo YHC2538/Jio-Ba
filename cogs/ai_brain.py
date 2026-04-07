@@ -188,6 +188,14 @@ class AIBrain(commands.Cog):
                 target_participant = await db_cog.get_participant(ObjectId(event_id), int(target_uid))
 
             interview_data = (target_participant or {}).get("interview", {}) or {}
+            user_profile = {}
+            user_profile_hint = ""
+            if target_uid:
+                try:
+                    user_profile = await db_cog.get_user_profile(int(target_uid))
+                    user_profile_hint = await db_cog.get_user_profile_hint(int(target_uid), max_items_per_bucket=3)
+                except Exception as profile_err:
+                    print(f"[DEBUG LOG] Failed to hydrate user profile for {target_uid}: {profile_err}")
             
             # Convert user input to HumanMessage
             from langchain_core.messages import HumanMessage
@@ -205,6 +213,8 @@ class AIBrain(commands.Cog):
                 "current_question_id": interview_data.get("current_question_id", ""),
                 "warning_count": (target_participant or {}).get("warning_count", 0),
                 "warning_threshold": int(((event.get("warning_policy", {}) or {}).get("threshold", 5))),
+                "user_profile": user_profile,
+                "user_profile_hint": user_profile_hint,
             }
 
             base_thread_key = f"{event_id}:{target_uid}" if target_uid is not None else str(event_id)
@@ -278,6 +288,16 @@ class AIBrain(commands.Cog):
 
                          if completed:
                              await db_cog.update_participant_status(_event_id_obj, _uid, "READY")
+                             jio_cog_for_profile = self.bot.get_cog("Jio")
+                             if jio_cog_for_profile:
+                                 try:
+                                     jio_cog_for_profile.trigger_profile_update_background(
+                                         _event_id_obj,
+                                         _uid,
+                                         reason="graph_completed",
+                                     )
+                                 except Exception as profile_trigger_err:
+                                     print(f"[DEBUG LOG] Failed to trigger profile update from graph completion: {profile_trigger_err}")
                              
                          # Check warnings
                          old_warnings = initial_state.get("warning_count", 0)

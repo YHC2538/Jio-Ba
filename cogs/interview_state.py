@@ -31,6 +31,8 @@ class InterviewState(TypedDict, total=False):
     revision_count: int
     revision_target_qid: str
     revision_attempt: bool
+    user_profile: Dict[str, Any]
+    user_profile_hint: str
 
 
 def normalize_question_id(question_id: Optional[str], questions: List[Dict[str, Any]]) -> str:

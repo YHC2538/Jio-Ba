@@ -12,6 +12,11 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from bson import ObjectId
 from cogs.matching.nsw_calculator import CandidatePlan, UserProfile, rank_candidates
+from cogs.profile_memory import (
+    build_profile_dealbreakers,
+    build_profile_preference_fallback,
+    extract_structured_profile_update,
+)
 
 
 CORE_TOPICS = ["what", "where", "when", "how"]
@@ -221,7 +226,8 @@ async def parse_activity_and_questions_with_llm(text: str, title: str = "", cust
 4) 題目需為繁體中文、可直接回答、具體，不要空泛。
 5) 禁止輸出 why 欄位與 why 題。
 6) 如果使用者在活動描述中，可能無明確決定 seeds，然而針對 seeds 或問題設計有條件限制（例如「只能在台北」、「只能晚上」、「時間必須精確到幾時幾分」），請務必根據條件限制來設計訪談題目。(但仍然必須按照JSON格式輸出，不要在 JSON 以外的地方說明)。
-7) 不要輸出多餘文字。
+7) 如果使用者明確表達某些 seeds 不必決定或訪問，例如「地點不重要」「地點不要問」、「時間隨便」「時間不用決定」等，請將該 generated questions 和 seeds 留空，並且不要為該 seeds 產生訪談題目。(但 "抽取" 的 seeds 請敘述主揪已裁定不必訪問)。
+8) 不要輸出多餘文字。
 """
         user_prompt = (
             f"活動標題: {str(title or '').strip()}\n"
@@ -1506,6 +1512,60 @@ class ConfirmSubmissionView(View):
 class Jio(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._profile_tasks = {}
+
+    def _profile_task_key(self, event_id, user_id):
+        return f"{str(event_id)}:{int(user_id)}"
+
+    def trigger_profile_update_background(self, event_id, user_id, reason="confirm_submission"):
+        key = self._profile_task_key(event_id, user_id)
+        existing = self._profile_tasks.get(key)
+        if existing and not existing.done():
+            return False
+
+        task = self.bot.loop.create_task(
+            self._run_profile_update_task(str(event_id), int(user_id), reason=str(reason or "manual"))
+        )
+        self._profile_tasks[key] = task
+
+        def _cleanup(done_task):
+            self._profile_tasks.pop(key, None)
+            try:
+                done_task.result()
+            except Exception as task_err:
+                print(f"[PROFILE] Background profile task failed ({key}): {task_err}")
+
+        task.add_done_callback(_cleanup)
+        return True
+
+    async def _run_profile_update_task(self, event_id, user_id, reason="confirm_submission"):
+        db = self.bot.get_cog("Database")
+        if not db:
+            return
+
+        try:
+            if await db.is_profile_event_processed(user_id, event_id):
+                return
+
+            event = await self._get_event_by_id_str(event_id)
+            if not event:
+                return
+
+            participant = self._get_participant_from_event(event, user_id)
+            if not participant:
+                return
+
+            profile_update = await extract_structured_profile_update(event, participant)
+            if profile_update:
+                await db.merge_user_profile(user_id, profile_update, source_event_id=event_id)
+            else:
+                await db.mark_profile_event_processed(user_id, event_id)
+        except Exception as err:
+            print(f"[PROFILE] Extraction failed (event={event_id}, user={user_id}, reason={reason}): {err}")
+            try:
+                await db.record_profile_error(user_id, event_id, f"{reason}: {err}")
+            except Exception as record_err:
+                print(f"[PROFILE] Failed to record profile error: {record_err}")
 
     def _remaining_interview_minutes(self, event):
         deadline = (event or {}).get("interview_deadline")
@@ -1845,6 +1905,7 @@ class Jio(commands.Cog):
         )
         await db.remove_participating_event(user_id, str(event_id))
         await self.promote_next_queued_event_for_user(user_id)
+        self.trigger_profile_update_background(event_id, user_id, reason="confirm_button")
 
         try:
             await interaction.user.send("✅ 已確認送出你的最終訪談結果。")
@@ -2331,7 +2392,20 @@ class Jio(commands.Cog):
 
         return answers
 
-    def build_nsw_candidates(self, participants, event_seeds=None):
+    def _merge_answers_with_profile_fallback(self, answers, profile):
+        merged = dict(answers or {})
+        fallback = build_profile_preference_fallback(profile)
+
+        for key, value in fallback.items():
+            if str(merged.get(key) or "").strip():
+                continue
+            cleaned = str(value or "").strip()
+            if cleaned:
+                merged[key] = cleaned
+        return merged
+
+    async def build_nsw_candidates(self, participants, event_seeds=None):
+        db = self.bot.get_cog("Database")
         users = []
         what_options = set()
         where_options = set()
@@ -2342,13 +2416,29 @@ class Jio(commands.Cog):
             if participant.get("status") in ["KICKED", "DECLINED", "FINISHED"]:
                 continue
 
+            user_id = participant.get("user_id")
+            if user_id is None:
+                continue
+            profile = {}
+            if db and user_id is not None:
+                try:
+                    profile = await db.get_user_profile(int(user_id))
+                except Exception:
+                    profile = {}
+
             preferences = self._merge_answers_with_event_seeds(participant, event_seeds)
+            preferences = self._merge_answers_with_profile_fallback(preferences, profile)
             weights = participant.get("weights", {}) or {}
+            dealbreakers = list(participant.get("dealbreakers", []) or [])
+            for token in build_profile_dealbreakers(profile):
+                if token and token not in dealbreakers:
+                    dealbreakers.append(token)
+
             users.append(
                 UserProfile(
-                    user_id=participant.get("user_id"),
+                    user_id=user_id,
                     preferences=preferences,
-                    dealbreakers=participant.get("dealbreakers", []) or [],
+                    dealbreakers=dealbreakers,
                     weights=weights,
                 )
             )
@@ -2424,7 +2514,7 @@ class Jio(commands.Cog):
             return
 
         event_seeds = event.get("activity_seeds", {}) or {}
-        candidates = self.build_nsw_candidates(event.get("participants", []), event_seeds=event_seeds)
+        candidates = await self.build_nsw_candidates(event.get("participants", []), event_seeds=event_seeds)
         if not candidates:
             return
 
