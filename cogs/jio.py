@@ -2221,7 +2221,7 @@ class Jio(commands.Cog):
 
         base_embed = discord.Embed(
             title=f"👋 訪談開始 | {event.get('title', '未命名活動')} by {host_name}",
-            description="先給你完整題目列表，接著我會再用另一則訊息開始逐題提問。",
+            description="我是揪霸，在這邊會問你幾個問題以確認你的偏好 ~~。\n先給你完整題目列表，接著我會再用另一則訊息開始逐題提問。",
             color=0x2ecc71,
         )
         base_embed.add_field(name=f"主揪 {host_name}", value=event.get("description", "（無）")[:1000], inline=False)
@@ -3171,6 +3171,46 @@ class Jio(commands.Cog):
             },
         )
 
+    async def _resolve_host_name(self, host_id):
+        host_name = "Unknown"
+        host_user = self.bot.get_user(host_id)
+        if not host_user:
+            try:
+                host_user = await self.bot.fetch_user(host_id)
+            except Exception:
+                host_user = None
+        if host_user:
+            host_name = getattr(host_user, "display_name", None) or getattr(host_user, "name", "Unknown")
+        return host_name
+
+    async def _announce_final_plan(self, event, selected, scheduled_event_id=None, mention_user_ids=None):
+        channel = await self._resolve_channel(event.get("channel_id"))
+        if not channel:
+            return
+
+        candidate = (selected or {}).get("candidate", {}) or {}
+        host_name = await self._resolve_host_name(event.get("initiator_id"))
+
+        announce_embed = discord.Embed(
+            title=f"📢 {event.get('title', '未命名活動')} 最終方案出爐!",
+            color=0x2ECC71,
+        )
+        announce_embed.add_field(name="What", value=str(candidate.get("what") or "待定"), inline=False)
+        announce_embed.add_field(name="Where", value=str(candidate.get("where") or "待定"), inline=False)
+        announce_embed.add_field(name="When", value=str(candidate.get("when") or "待定"), inline=False)
+        announce_embed.add_field(name="How", value=str(candidate.get("how") or candidate.get("budget") or "待定"), inline=False)
+        announce_embed.add_field(name="主揪", value=str(host_name), inline=False)
+
+        announce_text = None
+        if scheduled_event_id:
+            announce_embed.add_field(name="Discord Event", value=f"ID: {scheduled_event_id}", inline=False)
+            mention_user_ids = [uid for uid in (mention_user_ids or []) if uid]
+            if mention_user_ids:
+                mention_text = " ".join([f"<@{uid}>" for uid in mention_user_ids])
+                announce_text = "請以下參與的成員前往活動事件按 Interested：\n" + mention_text
+
+        await channel.send(content=announce_text, embed=announce_embed)
+
     async def apply_adjudication_choice(self, event_id, user_id, choice_index, interaction=None):
         db = self.bot.get_cog("Database")
 
@@ -3262,41 +3302,17 @@ class Jio(commands.Cog):
 
         await self.disable_management_view(event_id)
 
-        channel = await self._resolve_channel(event.get("channel_id"))
-        if channel:
-            candidate = selected.get("candidate", {})
-            ready_mentions = []
-            for p in event.get("participants", []):
-                if p.get("status") == "READY":
-                    ready_mentions.append(f"<@{p.get('user_id')}>")
+        ready_user_ids = []
+        for p in event.get("participants", []):
+            if p.get("status") == "READY" and p.get("user_id"):
+                ready_user_ids.append(p.get("user_id"))
 
-            host_name = "Unknown"
-            host_id = event.get("initiator_id")
-            host_user = self.bot.get_user(host_id)
-            if not host_user:
-                try:
-                    host_user = await self.bot.fetch_user(host_id)
-                except Exception:
-                    host_user = None
-            if host_user:
-                host_name = getattr(host_user, "display_name", None) or getattr(host_user, "name", "Unknown")
-
-            announce_embed = discord.Embed(
-                title=f"📢 {event.get('title', '未命名活動')} 最終方案出爐!",
-                color=0x2ECC71,
-            )
-            announce_embed.add_field(name="What", value=str(candidate.get("what") or "待定"), inline=False)
-            announce_embed.add_field(name="Where", value=str(candidate.get("where") or "待定"), inline=False)
-            announce_embed.add_field(name="When", value=str(candidate.get("when") or "待定"), inline=False)
-            announce_embed.add_field(name="How", value=str(candidate.get("how") or candidate.get("budget") or "待定"), inline=False)
-            announce_embed.add_field(name="主揪", value=str(host_name), inline=False)
-
-            announce_text = None
-            if scheduled_event_id:
-                announce_embed.add_field(name="Discord Event", value=f"ID: {scheduled_event_id}", inline=False)
-                if ready_mentions:
-                    announce_text = "請以下通過面試的成員前往活動事件按 Interested：\n" + " ".join(ready_mentions)
-            await channel.send(content=announce_text, embed=announce_embed)
+        await self._announce_final_plan(
+            event,
+            selected,
+            scheduled_event_id=scheduled_event_id,
+            mention_user_ids=ready_user_ids,
+        )
 
         await _reply("✅ 已完成裁決並公告。")
 
@@ -3411,16 +3427,15 @@ class Jio(commands.Cog):
         interview_questions = event.get("interview_questions", []) or []
         if not interview_questions:
             seeds = event.get("activity_seeds", {}) or {}
-            known_lines = []
-            if str(seeds.get("what") or "").strip():
-                known_lines.append(f"- What: {str(seeds.get('what')).strip()}")
-            if str(seeds.get("where") or "").strip():
-                known_lines.append(f"- Where: {str(seeds.get('where')).strip()}")
-            if str(seeds.get("when") or "").strip():
-                known_lines.append(f"- When: {str(seeds.get('when')).strip()}")
-            if str(seeds.get("how") or "").strip():
-                known_lines.append(f"- How: {str(seeds.get('how')).strip()}")
-            known_block = "\n".join(known_lines) if known_lines else f"- 描述: {event.get('description', '（無）')}"
+            selected = {
+                "candidate": {
+                    "what": str(seeds.get("what") or "活動內容待定"),
+                    "where": str(seeds.get("where") or "地點待定"),
+                    "when": str(seeds.get("when") or "時間待定"),
+                    "budget": str(seeds.get("how") or "流程待定"),
+                }
+            }
+            scheduled_event_id = await self.create_scheduled_event_from_plan(event, selected)
 
             await db.events.update_one(
                 {"_id": event_id},
@@ -3429,14 +3444,10 @@ class Jio(commands.Cog):
                         "active": False,
                         "workflow_state": "FINISHED",
                         "adjudication_status": "DECIDED",
-                        "adjudication_result": {
-                            "candidate": {
-                                "what": str(seeds.get("what") or "活動內容待定"),
-                                "where": str(seeds.get("where") or "地點待定"),
-                                "when": str(seeds.get("when") or "時間待定"),
-                                "budget": str(seeds.get("how") or "流程待定"),
-                            }
-                        },
+                        "adjudication_result": selected,
+                        "adjudication_by": event.get("initiator_id"),
+                        "adjudication_at": datetime.datetime.utcnow(),
+                        "scheduled_event_id": str(scheduled_event_id) if scheduled_event_id else None,
                     }
                 },
             )
@@ -3459,15 +3470,22 @@ class Jio(commands.Cog):
                     await db.remove_participating_event(uid, str(event_id))
                     await self.promote_next_queued_event_for_user(uid)
 
-            if event_channel:
-                try:
-                    await event_channel.send(
-                        "✅ 本活動無額外題目需訪談，已直接完成。\n"
-                        "以下為目前已知資訊：\n"
-                        f"{known_block}"
-                    )
-                except Exception:
-                    pass
+            passed_user_ids = []
+            for participant in event.get("participants", []):
+                uid = participant.get("user_id")
+                status = str(participant.get("status") or "").upper()
+                if not uid:
+                    continue
+                if status in {"KICKED", "DECLINED"}:
+                    continue
+                passed_user_ids.append(uid)
+
+            await self._announce_final_plan(
+                event,
+                selected,
+                scheduled_event_id=scheduled_event_id,
+                mention_user_ids=passed_user_ids,
+            )
 
             await self.disable_management_view(event_id)
             await self.update_dashboard(event_id)
